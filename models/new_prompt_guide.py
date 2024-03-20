@@ -13,7 +13,7 @@ class HuggingCLIPLanguageBackbone(nn.Module):
                  frozen_modules: Sequence[str] = ['all'],
                  dropout: float = 0.0,
                  training_use_cache: bool = False) -> None:
-
+        super(HuggingCLIPLanguageBackbone, self).__init__()
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -87,6 +87,9 @@ class HuggingCLIPLanguageBackbone(nn.Module):
         super().train(mode)
         self._freeze_modules()
 
+    @property
+    def prompt_dim(self):
+        return self.model.text_projection.out_features
 
 
 DEFAULT_CLASSES = """\
@@ -105,4 +108,6 @@ def build(model_name: str = 'openai/clip-vit-base-patch32',
           frozen_modules: Sequence[str] = ['all'],
           dropout: float = 0.0,
           training_use_cache: bool = False) -> HuggingCLIPLanguageBackbone:
-    return HuggingCLIPLanguageBackbone(model_name, frozen_modules, dropout, training_use_cache)
+    model = HuggingCLIPLanguageBackbone(model_name, frozen_modules, dropout, training_use_cache)
+    # model.train()
+    return model
