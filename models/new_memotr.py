@@ -24,9 +24,13 @@ from utils.utils import inverse_sigmoid
 
 from torch.utils.checkpoint import checkpoint
 
+## New comings
+from .new_prompt_guide import build as build_prompt_guide
+
 
 class MeMOTR(nn.Module):
-    def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
+    def __init__(self, backbone: BackboneWithPE, prompt_guide: nn.Module, 
+                 transformer: DeformableTransformer,
                  query_updater: nn.Module,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
@@ -52,6 +56,8 @@ class MeMOTR(nn.Module):
         # Net:
         self.backbone = backbone
         self.transformer = transformer
+        self.prompt_guide = prompt_guide
+        self.prompt = None # Keep prompt's info
         self.query_updater = query_updater
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
@@ -76,6 +82,14 @@ class MeMOTR(nn.Module):
                 nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
             ))
         self.feature_projs = nn.ModuleList(feature_proj_list)
+
+        if self.use_prompt:
+            prompt_dim = self.prompt_guide.prompt_dim # 512
+            self.prompt_proj = nn.Sequential(
+                nn.LayerNorm(prompt_dim * (num_classes+1)),
+                nn.Linear(prompt_dim * (num_classes+1), self.hidden_dim),
+            )
+
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
@@ -94,7 +108,12 @@ class MeMOTR(nn.Module):
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances]):
+
+    @property
+    def use_prompt(self):
+        return hasattr(self, "prompt_guide") and self.prompt_guide is not None
+
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], prompt_query: str = None):
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
@@ -103,6 +122,13 @@ class MeMOTR(nn.Module):
             features, pos = checkpoint(self.backbone, frame, use_reentrant=False)
         else:
             features, pos = self.backbone(frame)
+
+        if self.use_prompt: # say num_classes=80, num_per_batch=1, prompt_dim=512
+            prompt_list = [[p.strip()] for p in prompt_query.split(',')] + [[' ']]
+            prompt_emb = self.prompt_guide(prompt_list) # (81, 1, 512) @TODO: num_classes during inference would be different, think about it
+            prompt = prompt_emb.reshape(1, -1) # (1, 81*512)
+            self.prompt = self.prompt_proj(prompt) # (1, hidden_dim)
+            
 
         srcs, masks = [], []
         for layer, feat in enumerate(features):
@@ -252,6 +278,20 @@ class MeMOTR(nn.Module):
         track_references = self.get_track_reference_points(tracks=tracks).to(det_references.device)     # (B, Nq, 2)
         return torch.cat((det_references, track_references), dim=1)
 
+    def get_query_embed_with_prompt(self, det_query_embed: torch.Tensor) -> torch.Tensor:
+        """
+        prompt_guide: (num_classes, repeat, prompt_dim)
+        
+        Returns: (B, Nd, 2C)
+        """
+        B, Nd, _ = det_query_embed.shape
+
+        # Repeat self.prompt for Nd times
+        prompt = self.prompt.repeat(Nd, 1) # (Nd, hidden_dim)
+        prompt = prompt.unsqueeze(0).repeat(B, 1, 1) # (B, Nd, hidden_dim)
+
+        return det_query_embed + prompt
+
     def get_query_embed(self, tracks: list[TrackInstances]):
         """
         Returns: (B, Nd+Nq, 2C)
@@ -261,6 +301,11 @@ class MeMOTR(nn.Module):
             det_query_embed = det_query_embed.repeat(len(tracks), 1, 1)
         else:
             det_query_embed = self.det_query_embed.repeat(len(tracks), 1, 1)                    # (B, Nd, 2C)
+        
+        # inject prompt guide
+        if self.use_prompt:
+            det_query_embed = self.get_query_embed_with_prompt(det_query_embed)
+        
         track_query_embed = self.get_track_query_embed(tracks).to(det_query_embed.device)       # (B, Nq, 2C)
         return torch.cat((det_query_embed, track_query_embed), dim=1)
 
@@ -294,6 +339,7 @@ def build(config: dict):
         "MOT17": 1,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
+        "waymore": 80,
     }
     assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
     num_classes = dataset_num_classes[config["DATASET"]]
@@ -301,9 +347,12 @@ def build(config: dict):
     backbone_with_pe = build_backbone_with_pe(config=config)
     deformable_transformer = build_deformable_transformer(config=config)
     query_updater = build_query_updater(config=config)
+    
+    prompt_guide = build_prompt_guide()
 
     return MeMOTR(
         backbone=backbone_with_pe,
+        prompt_guide=prompt_guide,
         transformer=deformable_transformer,
         query_updater=query_updater,
         num_classes=num_classes,
