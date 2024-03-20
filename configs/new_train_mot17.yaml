@@ -2,7 +2,7 @@
 # @Description  : Config for training DanceTrack.
 
 GIT_VERSION:
-
+CLS_MAP: COCO_CLS_MAP
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
@@ -107,5 +107,6 @@ MATCH_COST_GIOU: 2
 LOSS_WEIGHT_FOCAL: 2
 LOSS_WEIGHT_L1: 5
 LOSS_WEIGHT_GIOU: 2
+LOSS_WEIGHT_CONTRASTIVE: 1
 # Aux Loss Weight
 AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
