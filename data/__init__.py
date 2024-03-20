@@ -17,10 +17,12 @@ The above features can be achieved in a single .py file or multi of them.
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 from .dancetrack import build as build_dancetrack
-from .mot17 import build as build_mot17
+# from .mot17 import build as build_mot17
+from .new_mot17 import build as build_mot17
 from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
 from .utils import collate_fn
+from .open_vocab_utils import init_guide 
 from utils.utils import is_distributed
 
 
@@ -56,3 +58,11 @@ def build_dataloader(dataset: MOTDataset, sampler, batch_size: int, num_workers:
         collate_fn=collate_fn,
         pin_memory=True
     )
+
+from .data_utils import *
+
+def build_cls_map(config: dict) -> dict:
+    if config['CLS_MAP'] == 'COCO_CLS_MAP':
+        return COCO_CLS_MAP
+    else:
+        raise ValueError(f"CLS_MAP {config['CLS_MAP']} is not supported!")
