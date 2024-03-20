@@ -22,6 +22,7 @@ from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
 
+from .utils import logits_to_scores
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
@@ -91,13 +92,15 @@ class ClipCriterion:
                 "label_focal_loss": torch.zeros(()).to(self.device),
                 "aux_box_l1_loss": torch.zeros(()).to(self.device),
                 "aux_box_giou_loss": torch.zeros(()).to(self.device),
-                "aux_label_focal_loss": torch.zeros(()).to(self.device)
+                "aux_label_focal_loss": torch.zeros(()).to(self.device),
+                "con_loss": torch.zeros(()).to(self.device)
             }
         else:
             self.loss = {
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
-                "label_focal_loss": torch.zeros(()).to(self.device)
+                "label_focal_loss": torch.zeros(()).to(self.device),
+                "con_loss": torch.zeros(()).to(self.device)
             }
         return
 
@@ -109,6 +112,8 @@ class ClipCriterion:
                 return self.weight["box_giou_loss"]
             elif "label_focal_loss" in loss_name:
                 return self.weight["label_focal_loss"]
+            elif "con_loss" in loss_name:
+                return self.weight["con_loss"]
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -135,7 +140,11 @@ class ClipCriterion:
                     break
         return loss, log
 
-    def process_single_frame(self, model_outputs: dict, tracked_instances: List[TrackInstances], frame_idx: int):
+    def process_single_frame(self, model_outputs: dict, 
+                             tracked_instances: List[TrackInstances], 
+                             frame_idx: int, 
+                             pos_trackinstances_indx: List[torch.Tensor] = [], 
+                             num_pos: int = None):
         """
         Process this criterion for a single frame.
 
@@ -153,7 +162,6 @@ class ClipCriterion:
         # 2. Update the already tracked instances.
         tracked_instances = self.update_tracked_instances(model_outputs=model_outputs,
                                                           tracked_instances=tracked_instances)
-
         # 3. Get the detection results in current frame.
         detection_res = {
             "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
@@ -162,6 +170,7 @@ class ClipCriterion:
 
         # 4. Find some gts that do not include in the tracked instances mentioned in (2.),
         #    this gts need to be detected in current frame.
+        #       i.e. the ground-truths to match with newborn objects (current frame).
         gt_ids_to_idx = []
         for b in range(len(tracked_instances)):
             gt_ids_to_idx.append({
@@ -177,10 +186,14 @@ class ClipCriterion:
                     else:
                         gt_idx.append(-1)
                         num_disappeared_tracked_gts += 1
+                        
+            # Matched ids between tracked instances (previous frame) and ground-truths (current frame).
             tracked_instances[b].matched_idx = torch.as_tensor(data=gt_idx,
                                                                dtype=tracked_instances[b].matched_idx.dtype)
         # 4.+ Filter the gts that not in the tracked instances:
         gt_full_idx = []
+        # all of this are positive samples in the face of the guide,
+        # because all the ground-truths are currently considered as positive ones.
         untracked_gt_trackinstances = []
         for b in range(len(tracked_instances)):
             gt_full_idx.append(
@@ -199,6 +212,8 @@ class ClipCriterion:
 
         def matcher_res_for_gt_idx(res):
             for bi in range(len(res)):
+                if len(res[bi]) == 0:
+                    continue
                 ids = untracked_gt_trackinstances[bi].ids[res[bi][1]]
                 idx = []
                 for _ in ids:   # 遍历 ID
@@ -207,7 +222,9 @@ class ClipCriterion:
             return res
 
         # 6. Use the matched results to generate the tracked instances.
+        new_pos_trackinstances_indx = [] # len is B
         new_trackinstances = []     # len is B
+        pos_matcher_res = copy.deepcopy(matcher_res)
         for b in range(len(tracked_instances)):
             trackinstances = TrackInstances(frame_height=tracked_instances[b].frame_height,
                                             frame_width=tracked_instances[b].frame_width,
@@ -237,6 +254,13 @@ class ClipCriterion:
             trackinstances = trackinstances.to(self.device)
             new_trackinstances.append(trackinstances)
 
+            # Handle pos and neg
+            scores = logits_to_scores(model_outputs["pred_logits"][b][output_idx])
+            pos_idx_newborn_det = torch.where(torch.max(scores, dim=-1).indices <= num_pos)[0]
+            new_pos_trackinstances_indx.append(pos_idx_newborn_det) # @TODO Need to handle back prop here because shape cannot backpropagate.
+            pos_matcher_res[b][0] = matcher_res[b][0][pos_idx_newborn_det.cpu()]
+            pos_matcher_res[b][1] = matcher_res[b][1][pos_idx_newborn_det.cpu()]
+
         # 7. Add tracked instances to the matcher res, for loss computing.
         matcher_res = matcher_res_for_gt_idx(matcher_res)
         tracked_idx_to_gts_idx = []
@@ -248,6 +272,8 @@ class ClipCriterion:
                 tracked_outputs_idx, tracked_gts_idx
             ])
             assert len(tracked_outputs_idx) == len(tracked_gts_idx)
+        # matcher_res: newborn objects
+        # tracked_idx_to_gts_idx: tracked objects (prev frame)
         outputs_idx_to_gts_idx = copy.deepcopy(matcher_res)
         for b in range(len(tracked_instances)):
             outputs_idx_to_gts_idx[b][0] = torch.cat((outputs_idx_to_gts_idx[b][0], tracked_idx_to_gts_idx[b][0]))
@@ -263,15 +289,61 @@ class ClipCriterion:
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx)
 
+        # 9.5. Compute the contrastive loss.
+        pos_matcher_res = [list(_) for _ in pos_matcher_res] # positive matcher_res
+        pos_matcher_res = matcher_res_for_gt_idx(pos_matcher_res)
+        pos_outputs_idx_to_gts_idx = copy.deepcopy(pos_matcher_res)
+        for b in range(len(tracked_instances)):
+            if len(pos_trackinstances_indx) == 0:
+                continue
+            pos_tracked_idx_to_gts_idx = [
+                pos_trackinstances_indx[b].cpu(), # positive tracked instances index
+                tracked_instances[b].matched_idx[pos_trackinstances_indx[b].cpu()].cpu()
+            ]
+            # Positve tracks = Positive newborn instances + Positive tracked instances
+            pos_outputs_idx_to_gts_idx[b][0] = torch.cat((pos_outputs_idx_to_gts_idx[b][0], pos_tracked_idx_to_gts_idx[0]))
+            pos_outputs_idx_to_gts_idx[b][1] = torch.cat((pos_outputs_idx_to_gts_idx[b][1], pos_tracked_idx_to_gts_idx[1]))
+
+        con_loss_label = self.get_loss_label(outputs=model_outputs,
+                                             gt_trackinstances=gt_trackinstances,
+                                             idx_to_gts_idx=pos_outputs_idx_to_gts_idx)
+        # con_loss_l1, con_loss_giou = self.get_loss_box(outputs=model_outputs,
+        #                                                gt_trackinstances=gt_trackinstances,
+        #                                                idx_to_gts_idx=pos_outputs_idx_to_gts_idx)
+        
+        coeff_margin_con_loss = []
+        coeff_matcher_mask = []
+        coeff_weight = 50
+        coeff_scale = 1e-4
+        for b in range(len(tracked_instances)):
+            scores = logits_to_scores(model_outputs["pred_logits"][b][matcher_res[b][0]])
+            coeff_mask = torch.max(scores, dim=-1).indices <= num_pos # Positive mask
+            # _clone = torch.zeros_like(model_outputs["pred_logits"][b], dtype=torch.int64)
+            # _clone[matcher_res[b][0]] = 1
+            _clone = torch.clone(matcher_res[b][0])
+            _clone[~coeff_mask.cpu()] += torch.tensor(coeff_weight, dtype=torch.int64)
+            _tmp = (_clone - matcher_res[b][0]) ** 2
+            coeff_margin_con_loss.append(torch.exp(torch.sqrt(_tmp.to(self.device))) * coeff_scale)
+            coeff_matcher_mask.append(matcher_res[b][0])
+
+        con_loss_label = self.get_loss_con(outputs=model_outputs,
+                                           gt_trackinstances=gt_trackinstances,
+                                           idx_to_gts_idx=pos_outputs_idx_to_gts_idx,
+                                           coeff=coeff_margin_con_loss,
+                                           coeff_mask=coeff_matcher_mask)
+
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
         self.loss["box_l1_loss"] += loss_l1 * self.frame_weights[frame_idx]
         self.loss["box_giou_loss"] += loss_giou * self.frame_weights[frame_idx]
         self.loss["label_focal_loss"] += loss_label * self.frame_weights[frame_idx]
+        self.loss["con_loss"] += con_loss_label * self.frame_weights[frame_idx]
         # Update logs.
         self.log[f"frame{frame_idx}_box_l1_loss"] = loss_l1.item()
         self.log[f"frame{frame_idx}_box_giou_loss"] = loss_giou.item()
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
+        self.log[f"frame{frame_idx}_con_loss"] = con_loss_label.item()
+
         self.n_gts.append(n_gts)
 
         # 11. Compute aux loss.
@@ -350,6 +422,7 @@ class ClipCriterion:
         for b in range(len(tracked_instances)):
             tracked_instances[b] = tracked_instances[b].to(self.device)
             new_trackinstances[b] = new_trackinstances[b].to(self.device)
+            new_pos_trackinstances_indx[b] = new_pos_trackinstances_indx[b].to(self.device)
 
         # Compute IoU.
         for b in range(len(tracked_instances)):
@@ -367,7 +440,7 @@ class ClipCriterion:
             )[0])
             pass
 
-        return tracked_instances, new_trackinstances, unmatched_detections
+        return tracked_instances, new_trackinstances, unmatched_detections, new_pos_trackinstances_indx
 
     def update_tracked_instances(self, model_outputs: dict, tracked_instances: List[TrackInstances])\
             -> List[TrackInstances]:
@@ -383,6 +456,7 @@ class ClipCriterion:
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
+                # tracked_instances[b].labels = model_outputs["labels"][b][self.n_det_queries:][~track_mask] ## @BUG: this yields a bug.
         return tracked_instances
 
     def get_loss_label(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
@@ -411,6 +485,7 @@ class ClipCriterion:
                                   alpha=0.25,
                                   gamma=2)
 
+
         return loss
 
     @staticmethod
@@ -438,6 +513,47 @@ class ClipCriterion:
         )).sum()
         return loss_l1, loss_giou
 
+    def get_loss_con(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, coeff = None, coeff_mask=None):
+        """
+        Compute the classification loss.
+        """
+        pred_logits = [
+            preds[~mask] for preds, mask in zip(outputs["pred_logits"], outputs["query_mask"])
+        ]
+        gt_labels = [
+            torch.full((pred_logits[b].shape[:1]),
+                       self.num_classes,
+                       dtype=torch.int64,
+                       device=self.device) for b in range(len(gt_trackinstances))
+        ]
+        for b in range(len(pred_logits)):
+            gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
+                = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+        pred_logits = torch.cat(pred_logits)
+        gt_labels = torch.cat(gt_labels)
+        coeff = torch.cat(coeff) if coeff is not None else None
+        coeff_mask = torch.cat(coeff_mask) if coeff_mask is not None else None
+        gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
+            .to(pred_logits.dtype).to(pred_logits.device)
+
+        alpha=0.25
+        gamma=2
+
+        prob = pred_logits.sigmoid()
+        ce_loss = F.binary_cross_entropy_with_logits(pred_logits, gt_labels_one_hot, reduction="none")
+        p_t = prob * gt_labels_one_hot + (1 - prob) * (1 - gt_labels_one_hot)
+        loss = ce_loss * ((1 - p_t) ** gamma)
+
+        if alpha >= 0:
+            alpha_t = alpha * gt_labels_one_hot + (1 - alpha) * (1 - gt_labels_one_hot)
+            loss = alpha_t * loss
+
+        if coeff is not None and coeff_mask is not None:
+            loss[coeff_mask] = loss[coeff_mask] * coeff.unsqueeze(-1)
+
+        loss = loss.mean(1).sum() 
+
+        return loss
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """
@@ -471,7 +587,7 @@ def build(config: dict):
     dataset_num_classes = {
         "DanceTrack": 1,
         "SportsMOT": 1,
-        "MOT17": 1,
+        "MOT17": 80,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
     }
@@ -483,7 +599,8 @@ def build(config: dict):
         weight={
             "box_l1_loss": config["LOSS_WEIGHT_L1"],
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
-            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"]
+            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
+            "con_loss": config["LOSS_WEIGHT_CONTRASTIVE"]
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,
