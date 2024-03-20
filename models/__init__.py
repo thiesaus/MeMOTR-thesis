@@ -3,7 +3,8 @@
 import torch
 
 from utils.utils import distributed_rank
-from .memotr import build as build_memotr
+# from .memotr import build as build_memotr
+from .new2_memotr import build as build_memotr
 
 
 def build_model(config: dict):
