@@ -25,10 +25,14 @@ from utils.utils import inverse_sigmoid
 from torch.utils.checkpoint import checkpoint
 
 from .new_prompt_guide import build as build_prompt_guide
+from .new_prompt_guide import DEFAULT_CLASSES
+from collections import defaultdict
 
 
 class MeMOTR(nn.Module):
-    def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
+    def __init__(self, backbone: BackboneWithPE, 
+                 prompt_guide: nn.Module,
+                 transformer: DeformableTransformer,
                  query_updater: nn.Module,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
@@ -51,12 +55,26 @@ class MeMOTR(nn.Module):
         self.use_dab = use_dab
         self.visualize = visualize
 
+        self.prompt_guide = prompt_guide
+        self.prompt_proj = MLP(
+            input_dim=self.prompt_guide.prompt_dim,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            num_layers=3
+        )
+        # Conv2d, followed by a normalization layer
+        self.decoded_img_proj = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=1, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(1, affine=True, track_running_stats=True)
+        ) # (BxNdNq, 1, H, W) -> (BxNdNq, 1, H, W)
+
         # Net:
         self.backbone = backbone
         self.transformer = transformer
         self.query_updater = query_updater
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
+
         if self.use_dab:
             self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 4))  # (N_det, 4)
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim))       # (N_det, C)
@@ -96,7 +114,35 @@ class MeMOTR(nn.Module):
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances]):
+    def do_prompt(self, detr_outputs: torch.Tensor, guide = None):
+        """
+            guide (str | List[List[str]] | None)
+        """
+        if guide is None:
+            guide = DEFAULT_CLASSES
+        if type(guide) is str:
+            guided_cls: list[list[str]] = [[t.strip()] for t in guide.split(',')] # + [[' ']]
+        else: 
+            guided_cls = guide
+        if len(guided_cls) < 80:
+            print("WARNING: Expect to be provided 80 classes for prompt guide, but get less than 80.")
+        prompt_embed = self.prompt_guide(guided_cls).to(detr_outputs.device)
+        prompt_embed = prompt_embed.permute(1,0,2)              # (B, P, C)
+        prompt_proj = self.prompt_proj(prompt_embed)            # (B, P, hidden_dim)
+        prompt_proj = prompt_proj.repeat(detr_outputs.shape[1], 1, 1) # (Bs, P, hidden_dim)
+        con_loss = defaultdict()
+        _tmp_w = _tmp_h = int(self.hidden_dim**0.5)
+        N_dec, B, NdNq, _ = detr_outputs.shape
+        for i in range(N_dec):
+            _tmp_out = detr_outputs[i].view(-1,1,_tmp_w, _tmp_h) # (Bs x (Nd+Nq), 1, hidden_dim**0.5, hidden_dim**0.5
+            dec_proj = self.decoded_img_proj(_tmp_out).view(B, NdNq, self.hidden_dim) # (Bs, Nd+Nq, hidden_dim)
+            con_loss[i] = torch.einsum('bpc,bnc->bpn', dec_proj, prompt_proj) # (Bs, P, Nd+Nq)
+            con_loss[i] = con_loss[i] / (self.hidden_dim**0.5)
+        
+        return con_loss
+
+
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], guide: str = None):
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
@@ -143,6 +189,10 @@ class MeMOTR(nn.Module):
         # outputs: (n_dec_layers, B, Nd+Nq, C)
         # init_reference: (B, Nd+Nq, 2)
         # inter_references: (n_dec_layers, B, Nd+Nq, 4)
+        
+        # Calculate prompt
+        prompt_outputs: dict = self.do_prompt(guide=guide, detr_outputs=outputs)
+
         output_classes, output_bboxes = [], []
         assert outputs.ndim == 4, f"Deformable Transformer's outputs should have shape (n_dec_layers, B, Nd+Nq, C, " \
                                   f"but get n_dim={outputs.ndim}"
@@ -153,6 +203,8 @@ class MeMOTR(nn.Module):
                 reference = inter_references[level - 1]
             reference = inverse_sigmoid(reference)
             output_class = self.class_embed[level](outputs[level])
+            # Add image-prompt contrastive loss
+            output_class += prompt_outputs[level]
             bbox_tmp = self.bbox_embed[level](outputs[level])
             if reference.shape[-1] == 4:
                 bbox_tmp += reference
@@ -186,7 +238,8 @@ class MeMOTR(nn.Module):
             else inverse_sigmoid(inter_references[-2, :, :, :]),                                 # (B, Nd+Nq, 2)
             "query_mask": query_mask,                   # (B, Nd+Nq)
             "det_query_embed": query_embed[0][:self.n_det_queries],
-            "init_ref_pts": inverse_sigmoid(init_reference)
+            "init_ref_pts": inverse_sigmoid(init_reference),
+            "prompt_outputs": prompt_outputs
         }
         if self.aux_loss:
             res["aux_outputs"] = self.set_aux_loss(output_classes=output_classes,
@@ -282,7 +335,8 @@ class MeMOTR(nn.Module):
     def postprocess_single_frame(self, previous_tracks: List[TrackInstances],
                                  new_tracks: List[TrackInstances],
                                  unmatched_dets: List[TrackInstances] | None,
-                                 no_augment: bool = False):
+                                 no_augment: bool = False,
+                                 num_pos: int = None):
         """
         Query updating.
         """
@@ -293,7 +347,7 @@ def build(config: dict):
     dataset_num_classes = {
         "DanceTrack": 1,
         "SportsMOT": 1,
-        "MOT17": 1,
+        "MOT17": 80,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
     }
@@ -303,9 +357,12 @@ def build(config: dict):
     backbone_with_pe = build_backbone_with_pe(config=config)
     deformable_transformer = build_deformable_transformer(config=config)
     query_updater = build_query_updater(config=config)
+    
+    prompt_guide = build_prompt_guide()
 
     return MeMOTR(
         backbone=backbone_with_pe,
+        prompt_guide=prompt_guide,
         transformer=deformable_transformer,
         query_updater=query_updater,
         num_classes=num_classes,
