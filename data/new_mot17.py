@@ -63,9 +63,9 @@ class MOT17(MOTDataset):
                 for line in open(mot17_gt_path):
                     _, i, x, y, w, h, v = line.strip("\n").split(" ")
                     i, x, y, w, h, v = map(float, (i, x, y, w, h, v))
-                    i, x, y, w, h = map(int, (i, x, y, w, h))
+                    _, i, x, y, w, h = map(int, (_, i, x, y, w, h))
                     t = int(mot17_gt_path.split("/")[-1].split("\\")[-1].split(".")[0])
-                    self.mot17_gts[vid][t].append([i, x, y, w, h])
+                    self.mot17_gts[vid][t].append([i, x, y, w, h, _])
         # Prepare for MOTSynth
         if self.use_motsynth:
             self.motsynth_seq_names = [seq for seq in os.listdir(self.motsynth_seqs_dir)]
@@ -199,11 +199,11 @@ class MOT17(MOTDataset):
         info["areas"] = list()
         info["dataset"] = "MOT17" if ("MOT17" in frame_path or "MOTSynth" in frame_path) else "CrowdHuman"
 
-        for i, x, y, w, h in gt:
+        for i, x, y, w, h, _ in gt:
             info["boxes"].append(list(map(float, (x, y, w, h))))
             info["areas"].append(w * h)
             info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
-            info["labels"].append(0)
+            info["labels"].append(_)
         info["boxes"] = torch.as_tensor(info["boxes"])
         info["areas"] = torch.as_tensor(info["areas"])
         info["ids"] = torch.as_tensor(info["ids"], dtype=torch.long)
