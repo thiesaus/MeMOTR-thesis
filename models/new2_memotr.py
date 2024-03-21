@@ -142,7 +142,10 @@ class MeMOTR(nn.Module):
         return con_loss
 
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], guide: str = None):
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], guide = None):
+        """
+            guide (str | List[List[str]] | None)
+        """
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
