@@ -1,3 +1,13 @@
 .idea
 *.pth
 *.mp4
+dataset/*
+pretrained/
+
+.vscode/
+__pycache__/
+*.pyc
+*.egg-info/
+train_checkpoint_*/
+models/ops/build/
+*.egg
