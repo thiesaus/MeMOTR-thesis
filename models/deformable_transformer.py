@@ -190,7 +190,7 @@ class DeformableTransformer(nn.Module):
         return valid_ratio                          # (B, 2)
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
-                pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask):
+                pos_embeds: List[torch.Tensor], query_embed, prompt_embed, ref_pts, query_mask):
         assert self.two_stage or query_embed is not None
 
         src_flatten = []
@@ -252,7 +252,8 @@ class DeformableTransformer(nn.Module):
             src_valid_ratios=valid_ratios,
             query_pos=query_embed,
             query_mask=query_mask,
-            src_padding_mask=mask_flatten
+            src_padding_mask=mask_flatten,
+            prompt_embed=prompt_embed,
         )
         # if inter is Ture, shape = (n_layers, B, Nq, C), (n_layers, B, Nq, 4), (n_layer, B, Nq, 2C)
         # else, shape = (B, Nq, C), (B, Nq, 4)

@@ -54,7 +54,7 @@ class DeformableDecoder(nn.Module):
             )
 
     def forward(self, tgt, reference_points, src, src_spatial_shapes, src_level_start_index, src_valid_ratios,
-                query_pos, query_mask, src_padding_mask):
+                query_pos, query_mask, src_padding_mask, prompt_embed=None):
         """
         Args:
             tgt:                    query tgt, (B, Nq, C).
