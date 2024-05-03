@@ -89,15 +89,18 @@ class ClipCriterion:
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
+                "refer_loss": torch.zeros(()).to(self.device),
                 "aux_box_l1_loss": torch.zeros(()).to(self.device),
                 "aux_box_giou_loss": torch.zeros(()).to(self.device),
-                "aux_label_focal_loss": torch.zeros(()).to(self.device)
+                "aux_label_focal_loss": torch.zeros(()).to(self.device),
+                "aux_refer_loss": torch.zeros(()).to(self.device)
             }
         else:
             self.loss = {
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
-                "label_focal_loss": torch.zeros(()).to(self.device)
+                "label_focal_loss": torch.zeros(()).to(self.device),
+                "refer_loss": torch.zeros(()).to(self.device),
             }
         return
 
@@ -109,6 +112,8 @@ class ClipCriterion:
                 return self.weight["box_giou_loss"]
             elif "label_focal_loss" in loss_name:
                 return self.weight["label_focal_loss"]
+            elif "refer_loss" in loss_name:
+                return self.weight["refer_loss"]
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -157,7 +162,8 @@ class ClipCriterion:
         # 3. Get the detection results in current frame.
         detection_res = {
             "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
-            "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach()      # (B, Nd, 4)
+            "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
+            "pred_refers": model_outputs["pred_refers"][:, :self.n_det_queries, :].detach(),     # (B, Nd, 1)
         }
 
         # 4. Find some gts that do not include in the tracked instances mentioned in (2.),
@@ -253,25 +259,33 @@ class ClipCriterion:
             outputs_idx_to_gts_idx[b][0] = torch.cat((outputs_idx_to_gts_idx[b][0], tracked_idx_to_gts_idx[b][0]))
             outputs_idx_to_gts_idx[b][1] = torch.cat((outputs_idx_to_gts_idx[b][1], tracked_idx_to_gts_idx[b][1]))
 
-        # 8. Compute the classification loss.
+        # 8. Compute losses.
+        # classification loss
         loss_label = self.get_loss_label(outputs=model_outputs,
                                          gt_trackinstances=gt_trackinstances,
                                          idx_to_gts_idx=outputs_idx_to_gts_idx)
 
-        # 9. Compute the bounding box loss.
+        # bounding box loss.
         loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx)
+        
+        # referring loss
+        loss_refer = self.get_loss_refer(outputs=model_outputs,
+                                        gt_trackinstances=gt_trackinstances,
+                                        idx_to_gts_idx=outputs_idx_to_gts_idx)
 
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
         self.loss["box_l1_loss"] += loss_l1 * self.frame_weights[frame_idx]
         self.loss["box_giou_loss"] += loss_giou * self.frame_weights[frame_idx]
         self.loss["label_focal_loss"] += loss_label * self.frame_weights[frame_idx]
+        self.loss["refer_loss"] += loss_refer * self.frame_weights[frame_idx]
         # Update logs.
         self.log[f"frame{frame_idx}_box_l1_loss"] = loss_l1.item()
         self.log[f"frame{frame_idx}_box_giou_loss"] = loss_giou.item()
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
+        self.log[f"frame{frame_idx}_refer_loss"] = loss_refer.item()
         self.n_gts.append(n_gts)
 
         # 11. Compute aux loss.
@@ -280,7 +294,8 @@ class ClipCriterion:
                 # Same to 3.
                 aux_det_res = {
                     "pred_logits": aux_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),
-                    "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach()
+                    "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),
+                    "pred_refers": aux_outputs["pred_refers"][:, :self.n_det_queries, :].detach(),
                 }
                 # Same to 5.
                 if i < self.merge_det_track_layer:
@@ -309,10 +324,14 @@ class ClipCriterion:
                 aux_loss_l1, aux_loss_giou = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
                                                                idx_to_gts_idx=aux_idx_to_gts_idx)
+                aux_loss_refer = self.get_loss_refer(outputs=model_outputs["aux_outputs"][i],
+                                                     gt_trackinstances=gt_trackinstances,
+                                                     idx_to_gts_idx=aux_idx_to_gts_idx)
 
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
+                self.loss["aux_refer_loss"] += aux_loss_refer * self.frame_weights[frame_idx] * self.aux_weights[i]
 
         # Prepare the unmatched detection results.
         unmatched_detections = []
@@ -379,11 +398,13 @@ class ClipCriterion:
                 track_mask = model_outputs["query_mask"][b][self.n_det_queries:]
                 tracked_instances[b].boxes = model_outputs["pred_bboxes"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].logits = model_outputs["pred_logits"][b][self.n_det_queries:][~track_mask]
+                tracked_instances[b].refers = model_outputs["pred_refers"][b][self.n_det_queries:][~track_mask]
                 # Query embed and ref_pts will be updated in the query_updater module.
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
         return tracked_instances
+
 
     def get_loss_label(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
         """
@@ -438,6 +459,34 @@ class ClipCriterion:
         )).sum()
         return loss_l1, loss_giou
 
+    def get_loss_refer(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
+        """
+        Compute the referring loss. (need fixing)
+        """
+        pred_refers = [
+            preds[~mask] for preds, mask in zip(outputs["pred_refers"], outputs["query_mask"])
+        ]
+        gt_labels = [
+            torch.full((pred_refers[b].shape[:1]),
+                       self.num_classes,
+                       dtype=torch.int64,
+                       device=self.device) for b in range(len(gt_trackinstances))
+        ]
+        for b in range(len(pred_refers)):
+            gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
+                = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+        pred_refers = torch.cat(pred_refers)
+        gt_labels = torch.cat(gt_labels)
+        gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
+            .to(pred_refers.dtype).to(pred_refers.device)
+
+        loss = sigmoid_focal_loss(inputs=pred_refers,
+                                  targets=gt_labels_one_hot,
+                                  alpha=0.25,
+                                  gamma=2)
+
+        return loss
+
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """
@@ -483,7 +532,8 @@ def build(config: dict):
         weight={
             "box_l1_loss": config["LOSS_WEIGHT_L1"],
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
-            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"]
+            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
+            "refer_loss": config["LOSS_WEIGHT_REFER"]
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,
