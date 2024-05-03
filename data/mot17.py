@@ -64,7 +64,7 @@ class MOT17(MOTDataset):
                     _, i, x, y, w, h, v = line.strip("\n").split(" ")
                     i, x, y, w, h, v = map(float, (i, x, y, w, h, v))
                     i, x, y, w, h = map(int, (i, x, y, w, h))
-                    t = int(mot17_gt_path.split("/")[-1].split(".")[0])
+                    t = int(mot17_gt_path.split("/")[-1].split("\\")[-1].split(".")[0])
                     self.mot17_gts[vid][t].append([i, x, y, w, h])
         # Prepare for MOTSynth
         if self.use_motsynth:
@@ -77,21 +77,21 @@ class MOT17(MOTDataset):
                         continue
                     x, y, w, h = map(float, xywh)
                     self.motsynth_gts[vid][int(t)].append([int(i), x, y, w, h])
-        crowdhuman_gt_filenames = os.listdir(self.crowdhuman_gts_dir)
-        for filename in crowdhuman_gt_filenames:
-            crowdhuman_gt_path = os.path.join(self.crowdhuman_gts_dir, filename)
-            image_name = filename.split(".")[0]
-            for line in open(crowdhuman_gt_path):
-                _, i, x, y, w, h = line.strip("\n").split(" ")
-                i, x, y, w, h = map(int, (i, x, y, w, h))
-                self.crowdhuman_gts[image_name].append([i, x, y, w, h])
+        # crowdhuman_gt_filenames = os.listdir(self.crowdhuman_gts_dir)
+        # for filename in crowdhuman_gt_filenames:
+        #     crowdhuman_gt_path = os.path.join(self.crowdhuman_gts_dir, filename)
+        #     image_name = filename.split(".")[0]
+        #     for line in open(crowdhuman_gt_path):
+        #         _, i, x, y, w, h = line.strip("\n").split(" ")
+        #         i, x, y, w, h = map(int, (i, x, y, w, h))
+        #         self.crowdhuman_gts[image_name].append([i, x, y, w, h])
 
         self.set_epoch(epoch=0)     # init datasets
 
         return
 
     def __len__(self):
-        assert self.sample_begin_frame_paths is not None, "Please use set_epoch to init DanceTrack Dataset."
+        assert self.sample_begin_frame_paths is not None, "Please use set_epoch to init MOT17 Dataset."
         return len(self.sample_begin_frame_paths)
 
     def __getitem__(self, item):
@@ -159,8 +159,8 @@ class MOT17(MOTDataset):
             return [begin_frame_path] * self.sample_length
         if self.sample_mode == "random_interval":
             assert self.sample_length > 1, "Sample Length is less than 2."
-            vid = begin_frame_path.split("/")[-3]
-            begin_t = int(begin_frame_path.split("/")[-1].split(".")[0])
+            vid = begin_frame_path.split("/")[-1].split("\\")[-3]
+            begin_t = int(begin_frame_path.split("/")[-1].split("\\")[-1].split(".")[0])
             remain_frames = self.sample_vid_tmax[vid] - begin_t
             max_interval = math.floor(remain_frames / (self.sample_length - 1))
             interval = min(randint(1, self.sample_interval), max_interval)
@@ -179,8 +179,8 @@ class MOT17(MOTDataset):
             frame_name = frame_path.split("/")[-1].split(".")[0]
             gt = self.crowdhuman_gts[frame_name]
         elif "MOT17" in frame_path or "MOTSynth" in frame_path:
-            frame_idx = int(frame_path.split("/")[-1].split(".")[0])
-            vid = frame_path.split("/")[-3]
+            frame_idx = int(frame_path.split("/")[-1].split("\\")[-1].split(".")[0])
+            vid = frame_path.split("/")[-1].split("\\")[-3]
             if "MOTSynth" in frame_path:
                 gt = self.motsynth_gts[vid][frame_idx]
             else:
