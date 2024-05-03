@@ -24,16 +24,24 @@ from utils.utils import inverse_sigmoid
 
 from torch.utils.checkpoint import checkpoint
 
+# text encoder
+from .text_encoder import build as build_text_encoder
+
+# vi-lang components
+from .vi_lang_modules import VisionLanguageFusionModule, PositionEmbeddingSine1D, FeatureResizer
+from einops import rearrange
+import copy
 
 class MeMOTR(nn.Module):
     def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
-                 query_updater: nn.Module,
+                 query_updater: nn.Module, text_encoder,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
                  aux_loss: bool = True, with_box_refine: bool = True,
                  use_checkpoint: bool = False, checkpoint_level: int = 2,
                  use_dab: bool = False,
-                 visualize: bool = False):
+                 visualize: bool = False,
+                 **kwargs):
         super(MeMOTR, self).__init__()
 
         self.num_classes = num_classes
@@ -48,6 +56,21 @@ class MeMOTR(nn.Module):
         self.checkpoint_level = checkpoint_level
         self.use_dab = use_dab
         self.visualize = visualize
+
+        # referring branch
+        self.refer_embed = nn.Linear(hidden_dim, 1)
+
+        self.tokenizer, self.text_encoder = text_encoder
+
+        self.txt_proj = FeatureResizer(
+            input_feat_size=self.text_encoder.config.hidden_size,
+            output_feat_size=hidden_dim,
+            dropout=True,
+        )
+
+        self.fusion_module = VisionLanguageFusionModule(d_model=hidden_dim, nhead=8)
+        self.text_pos = PositionEmbeddingSine1D(hidden_dim, normalize=True)
+
 
         # Net:
         self.backbone = backbone
@@ -81,34 +104,79 @@ class MeMOTR(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+        self.refer_embed.bias.data = torch.ones(1) * bias_value
         for proj in self.feature_projs:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
+
+        num_pred = transformer.decoder.num_layers # because it is not two-stage
         if self.with_box_refine:
             self.class_embed = get_clones(self.class_embed, self.transformer.get_n_dec_layers())
             self.bbox_embed = get_clones(self.bbox_embed, self.transformer.get_n_dec_layers())
             nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
             self.transformer.set_refine_bbox_embed(self.bbox_embed)
+            self.refer_embed = nn.ModuleList([copy.deepcopy(self.refer_embed) for i in range(num_pred)])
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
+            self.refer_embed = nn.ModuleList([self.refer_embed for _ in range(num_pred)])
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances]):
+    def forward_text(self,
+                     text_queries: List[str],
+                     device: torch.device):
+        tokenized_queries = self.tokenizer.batch_encode_plus(text_queries, padding="longest", return_tensors='pt').to(device)
+        # with torch.inference_mode(mode=self.freeze_text_encoder):
+        encoded_text = self.text_encoder(**tokenized_queries)
+        # Transpose memory because pytorch's attention expects sequence first
+        text_features = encoded_text.last_hidden_state.clone()
+        text_features = self.txt_proj(text_features)  # change text embeddings dim to model dim
+        # Invert attention mask that we get from huggingface because its the opposite in pytorch transformer
+        text_pad_mask = tokenized_queries.attention_mask.ne(1).bool()  # [B, S]
+        text_sentence_features = text_features
+        return text_features, text_pad_mask, text_sentence_features
+
+    def forward(self, 
+                frame: NestedTensor, 
+                tracks: list[TrackInstances],
+                sentences):
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
-        # 图像经过 backbone
+        # backbone
         if self.use_checkpoint and self.checkpoint_level != 3:
             features, pos = checkpoint(self.backbone, frame, use_reentrant=False)
         else:
             features, pos = self.backbone(frame)
 
+        # extract linguistic features
+        src, mask = features[-1].decompose()
+        assert mask is not None
+        text_word_features, text_word_mask, text_sentence_features = self.forward_text(sentences, src.device)
+        text_word_features = text_word_features.flatten(0, 1).unsqueeze(0)
+        text_word_mask = text_word_mask.flatten(0, 1).unsqueeze(0)
+        text_pos = self.text_pos(NestedTensor(text_word_features, text_word_mask)).permute(2, 0, 1)
+        text_word_features = text_word_features.permute(1, 0, 2)
+
         srcs, masks = [], []
         for layer, feat in enumerate(features):
             src, mask = feat.decompose()
-            srcs.append(self.feature_projs[layer](src))
+
+            # add textual processing steps
+            src_proj_l = self.feature_projs[layer](src)
+            n, c, h, w = src_proj_l.shape
+            # vision-language fusion
+            src_proj_l = rearrange(src_proj_l, 'b c h w -> (h w) b c')
+            src_proj_l = self.fusion_module(tgt=src_proj_l,
+                                            memory=text_word_features,
+                                            memory_key_padding_mask=text_word_mask,
+                                            pos=text_pos,
+                                            query_pos=None)
+            src_proj_l = rearrange(src_proj_l, '(h w) b c -> b c h w', h=h, w=w)
+
+            srcs.append(src_proj_l)
             masks.append(mask)
+
         if self.n_feature_levels > len(srcs):
             srcs_len = len(srcs)
             for layer in range(srcs_len, self.n_feature_levels):
@@ -119,6 +187,16 @@ class MeMOTR(nn.Module):
                 mask = frame.masks
                 mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
                 pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+
+                # add similar textual processing steps
+                n,c,h,w = src.shape
+                src = rearrange(src, 'b c h w -> (h w) b c')
+                src = self.fusion_module(tgt=src,
+                                         memory=text_word_features,
+                                         memory_key_padding_mask=text_word_mask,
+                                         pos=text_pos,
+                                         query_pos=None)
+                src = rearrange(src, '(h w) b c -> b c h w', h=h, w=w)
                 srcs.append(src)
                 masks.append(mask)
         # srcs is n_feature_levels * [(B, C, H, W)]
@@ -135,13 +213,14 @@ class MeMOTR(nn.Module):
             masks=masks,
             pos_embeds=pos,
             query_embed=query_embed,
+            prompt_embed=text_sentence_features,
             ref_pts=reference_points,
             query_mask=query_mask
         )
         # outputs: (n_dec_layers, B, Nd+Nq, C)
         # init_reference: (B, Nd+Nq, 2)
         # inter_references: (n_dec_layers, B, Nd+Nq, 4)
-        output_classes, output_bboxes = [], []
+        output_classes, output_bboxes, output_refers = [], [], []
         assert outputs.ndim == 4, f"Deformable Transformer's outputs should have shape (n_dec_layers, B, Nd+Nq, C, " \
                                   f"but get n_dim={outputs.ndim}"
         for level in range(outputs.shape[0]):
@@ -152,6 +231,7 @@ class MeMOTR(nn.Module):
             reference = inverse_sigmoid(reference)
             output_class = self.class_embed[level](outputs[level])
             bbox_tmp = self.bbox_embed[level](outputs[level])
+            output_refer = self.refer_embed[level](outputs[level])
             if reference.shape[-1] == 4:
                 bbox_tmp += reference
             else:
@@ -160,6 +240,7 @@ class MeMOTR(nn.Module):
             output_bbox = bbox_tmp.sigmoid()
             output_classes.append(output_class)
             output_bboxes.append(output_bbox)
+            output_refers.append(output_refer)
 
             if self.visualize:
                 torch.save(reference[0, :self.n_det_queries, :].cpu(),
@@ -177,9 +258,12 @@ class MeMOTR(nn.Module):
 
         output_classes = torch.stack(output_classes, dim=0)
         output_bboxes = torch.stack(output_bboxes, dim=0)
+        output_refers = torch.stack(output_refers, dim=0)
+
         res = {
             "pred_logits": output_classes[-1],
             "pred_bboxes": output_bboxes[-1],
+            "pred_refers": output_refers[-1],
             "last_ref_pts": inverse_sigmoid(inter_references[-2, :, :, :]) if self.use_dab       # (B, Nd+Nq, 4)
             else inverse_sigmoid(inter_references[-2, :, :, :]),                                 # (B, Nd+Nq, 2)
             "query_mask": query_mask,                   # (B, Nd+Nq)
@@ -189,21 +273,22 @@ class MeMOTR(nn.Module):
         if self.aux_loss:
             res["aux_outputs"] = self.set_aux_loss(output_classes=output_classes,
                                                    output_bboxes=output_bboxes,
+                                                   output_refers=output_refers,
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         return res
 
     @torch.jit.unused
-    def set_aux_loss(self, output_classes, output_bboxes, query_mask, queries):
+    def set_aux_loss(self, output_classes, output_bboxes, output_refers, query_mask, queries):
         """
         this is a workaround to make torchscript happy, as torchscript
         doesn't support dictionary with non-homogeneous values, such
         as a dict having both a Tensor and a list.
         """
         return [
-            {"pred_logits": a, "pred_bboxes": b, "query_mask": query_mask, "queries": c}
-            for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], queries[1:])
+            {"pred_logits": a, "pred_bboxes": b, "pred_refers": ref, "query_mask": query_mask, "queries": c}
+            for a, b, c, ref in zip(output_classes[:-1], output_bboxes[:-1], queries[1:], output_refers[:-1])
         ]
 
     def get_det_reference_points(self) -> torch.Tensor:
@@ -301,11 +386,13 @@ def build(config: dict):
     backbone_with_pe = build_backbone_with_pe(config=config)
     deformable_transformer = build_deformable_transformer(config=config)
     query_updater = build_query_updater(config=config)
+    text_encoder = build_text_encoder(config=config)
 
     return MeMOTR(
         backbone=backbone_with_pe,
         transformer=deformable_transformer,
         query_updater=query_updater,
+        text_encoder=text_encoder,
         num_classes=num_classes,
         n_det_queries=config["NUM_DET_QUERIES"],
         n_feature_levels=config["NUM_FEATURE_LEVELS"],

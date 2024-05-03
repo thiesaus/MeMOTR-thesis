@@ -26,6 +26,7 @@ class TrackInstances:
         self.boxes = torch.zeros((0, 4))
         self.labels = torch.zeros((0,), dtype=torch.long)
         self.logits = torch.zeros((0, self.num_classes))
+        self.refers = torch.zeros((0,), dtype=torch.long)
         self.matched_idx = torch.zeros((0, ), dtype=torch.long)
         self.output_embed = torch.zeros((0, self.hidden_dim))
         self.disappear_time = torch.zeros((0,), dtype=torch.long)
