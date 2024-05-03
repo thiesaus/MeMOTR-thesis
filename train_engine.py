@@ -10,13 +10,11 @@ from typing import List, Tuple, Dict
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from models import build_model
-from data import build_dataset, build_sampler, build_dataloader, build_cls_map
-from data import init_guide
+from data import build_dataset, build_sampler, build_dataloader
 from utils.utils import labels_to_one_hot, is_distributed, distributed_rank, set_seed, is_main_process, \
     distributed_world_size
 from utils.nested_tensor import tensor_list_to_nested_tensor
-# from models.memotr import MeMOTR
-from models.new2_memotr import MeMOTR
+from models.memotr import MeMOTR
 from structures.track_instances import TrackInstances
 from models.criterion import build as build_criterion, ClipCriterion
 from models.utils import get_model, save_checkpoint, load_checkpoint
@@ -48,7 +46,6 @@ def train(config: dict):
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
     dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
                                         batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
-    cls_map = build_cls_map(config=config)
 
     # Criterion
     criterion = build_criterion(config=config)
@@ -141,8 +138,7 @@ def train(config: dict):
             accumulation_steps=config["ACCUMULATION_STEPS"],
             use_dab=config["USE_DAB"],
             multi_checkpoint=multi_checkpoint,
-            no_grad_frames=no_grad_frames,
-            cls_map=cls_map
+            no_grad_frames=no_grad_frames
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -163,7 +159,7 @@ def train(config: dict):
 
 def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     dataloader: DataLoader, criterion: ClipCriterion, optimizer: torch.optim,
-                    epoch: int, logger: Logger, cls_map: dict,
+                    epoch: int, logger: Logger,
                     accumulation_steps: int = 1, use_dab: bool = False,
                     multi_checkpoint: bool = False,
                     no_grad_frames: int | None = None):
@@ -193,6 +189,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     dataloader_len = len(dataloader)
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
+
+    # pseudo sentences
+    # TODO: get real sentences from dataloader
+    sentences = ["a photo of a human"]
+
     for i, batch in enumerate(dataloader):
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
@@ -204,43 +205,37 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                               num_classes=get_model(model).num_classes,
                               device=device)
 
-        pos_track_indx = []
         for frame_idx in range(len(batch["imgs"][0])):
-            guide, pos_guide, neg_guide = init_guide(labels=batch["infos"][0][frame_idx]["labels"], cls_map=cls_map)
             if no_grad_frames is None or frame_idx >= no_grad_frames:
                 frame = [fs[frame_idx] for fs in batch["imgs"]]
                 for f in frame:
                     f.requires_grad_(False)
                 frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                res = model(frame=frame, tracks=tracks, guide=pos_guide+neg_guide)
-                previous_tracks, new_tracks, unmatched_dets, pos_track_indx = criterion.process_single_frame(
+                res = model(frame=frame, tracks=tracks, sentences=sentences)
+                previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,
-                    frame_idx=frame_idx,
-                    pos_trackinstances_indx=pos_track_indx,
-                    num_pos=len(pos_guide),
+                    frame_idx=frame_idx
                 )
                 if frame_idx < len(batch["imgs"][0]) - 1:
                     tracks = get_model(model).postprocess_single_frame(
-                        previous_tracks, new_tracks, unmatched_dets, num_pos=len(pos_guide))
+                        previous_tracks, new_tracks, unmatched_dets)
             else:
                 with torch.no_grad():
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
                     for f in frame:
                         f.requires_grad_(False)
                     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                    res = model(frame=frame, tracks=tracks, guide=pos_guide+neg_guide)
-                    previous_tracks, new_tracks, unmatched_dets, pos_track_indx = criterion.process_single_frame(
+                    res = model(frame=frame, tracks=tracks, sentences=sentences)
+                    previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                         model_outputs=res,
                         tracked_instances=tracks,
-                        frame_idx=frame_idx,
-                        pos_trackinstances_indx=pos_track_indx,
-                        num_pos=len(pos_guide),
+                        frame_idx=frame_idx
                     )
                     if frame_idx < len(batch["imgs"][0]) - 1:
                         tracks = get_model(model).postprocess_single_frame(
                             previous_tracks, new_tracks, unmatched_dets, \
-                                no_augment=frame_idx < no_grad_frames-1, num_pos=len(pos_guide))
+                                no_augment=frame_idx < no_grad_frames-1)
 
         loss_dict, log_dict = criterion.get_mean_by_n_gts()
         loss = criterion.get_sum_loss_dict(loss_dict=loss_dict)
