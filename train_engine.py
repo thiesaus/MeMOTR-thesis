@@ -10,7 +10,7 @@ from typing import List, Tuple, Dict
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from models import build_model
-from data import build_dataset, build_sampler, build_dataloader
+from data import build_dataset, build_sampler, build_dataloader, build_dataloader_w_sen
 from utils.utils import labels_to_one_hot, is_distributed, distributed_rank, set_seed, is_main_process, \
     distributed_world_size
 from utils.nested_tensor import tensor_list_to_nested_tensor
@@ -24,6 +24,8 @@ from log.logger import Logger, ProgressLogger
 from log.log import MetricLog
 from models.utils import load_pretrained_model
 
+# Visualization
+from utils.tools import visualize_a_batch, visualize_a_batch_w_sen
 
 def train(config: dict):
     train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True)
@@ -100,8 +102,10 @@ def train(config: dict):
         dataset_train.set_epoch(epoch)
 
         sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-        dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                            batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+        #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+        dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+                                                  batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
             optimizer.param_groups[0]["lr"] = 0.0
@@ -145,7 +149,7 @@ def train(config: dict):
         if multi_checkpoint is True:
             pass
         else:
-            if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
+            if config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
                 save_checkpoint(
                     model=model,
                     path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
@@ -190,11 +194,17 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
 
-    # pseudo sentences
-    # TODO: get real sentences from dataloader
-    sentences = ["a photo of a human"]
+    # # pseudo sentences
+    # # TODO: get real sentences from dataloader
+    # sentences = ["a photo of a human"]
 
     for i, batch in enumerate(dataloader):
+        sentences = batch["sentence"]
+
+        ## visualize the batch
+        # visualize_a_batch_w_sen(batch)
+        # continue
+
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,

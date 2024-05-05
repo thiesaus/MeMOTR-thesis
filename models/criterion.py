@@ -523,6 +523,7 @@ def build(config: dict):
         "MOT17": 1,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
+        "MOT17_COCO": 1,
     }
     return ClipCriterion(
         num_classes=dataset_num_classes[config["DATASET"]],

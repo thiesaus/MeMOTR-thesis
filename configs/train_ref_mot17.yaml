@@ -41,7 +41,7 @@ EVAL_THREADS: 1
 EVAL_DATA_SPLIT: val
 
 # About data processing
-DATASET: MOT17
+DATASET: MOT17_COCO
 USE_MOTSYNTH:
 USE_CROWDHUMAN: False
 MOTSYNTH_RATE:
@@ -117,3 +117,6 @@ MODEL_NAME: roberta-base
 FREEZE_TEXT_ENCODER: True
 
 LOSS_WEIGHT_REFER: 2
+
+# COCO MOT17
+TRAIN_COCO: ./data/mot17_train_coco_reforged.json
