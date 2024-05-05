@@ -10,3 +10,5 @@ build/
 *.egg
 events.out.tfevents.*
 hf_pretrained/
+saved_tracked_videos/
+train_checkpoint_*/
