@@ -17,6 +17,8 @@ class MOT17(MOTDataset):
     def __init__(self, config: dict, split: str, transform):
         super(MOT17, self).__init__(config=config, split=split, transform=transform)
 
+        self.splitter = "\\" if os.name == "nt" else "/"
+
         self.config = config
         self.transform = transform
         self.use_motsynth = config["USE_MOTSYNTH"]
@@ -64,7 +66,7 @@ class MOT17(MOTDataset):
                     _, i, x, y, w, h, v = line.strip("\n").split(" ")
                     i, x, y, w, h, v = map(float, (i, x, y, w, h, v))
                     i, x, y, w, h = map(int, (i, x, y, w, h))
-                    t = int(mot17_gt_path.split("/")[-1].split("\\")[-1].split(".")[0])
+                    t = int(mot17_gt_path.split(self.splitter)[-1].split(".")[0])
                     self.mot17_gts[vid][t].append([i, x, y, w, h])
         # Prepare for MOTSynth
         if self.use_motsynth:
@@ -159,8 +161,8 @@ class MOT17(MOTDataset):
             return [begin_frame_path] * self.sample_length
         if self.sample_mode == "random_interval":
             assert self.sample_length > 1, "Sample Length is less than 2."
-            vid = begin_frame_path.split("/")[-1].split("\\")[-3]
-            begin_t = int(begin_frame_path.split("/")[-1].split("\\")[-1].split(".")[0])
+            vid = begin_frame_path.split(self.splitter)[-3]
+            begin_t = int(begin_frame_path.split(self.splitter)[-1].split(".")[0])
             remain_frames = self.sample_vid_tmax[vid] - begin_t
             max_interval = math.floor(remain_frames / (self.sample_length - 1))
             interval = min(randint(1, self.sample_interval), max_interval)
@@ -179,8 +181,8 @@ class MOT17(MOTDataset):
             frame_name = frame_path.split("/")[-1].split(".")[0]
             gt = self.crowdhuman_gts[frame_name]
         elif "MOT17" in frame_path or "MOTSynth" in frame_path:
-            frame_idx = int(frame_path.split("/")[-1].split("\\")[-1].split(".")[0])
-            vid = frame_path.split("/")[-1].split("\\")[-3]
+            frame_idx = int(frame_path.split(self.splitter)[-1].split(".")[0])
+            vid = frame_path.split(self.splitter)[-3]
             if "MOTSynth" in frame_path:
                 gt = self.motsynth_gts[vid][frame_idx]
             else:
