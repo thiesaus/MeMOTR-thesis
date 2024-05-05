@@ -235,7 +235,7 @@ class QueryUpdater(nn.Module):
                     fake_tracks.matched_idx = torch.as_tensor([-2], dtype=torch.long, device=device)
                     fake_tracks.boxes = torch.randn((1, 4), dtype=torch.float, device=device)
                     fake_tracks.logits = torch.randn((1, active_tracks.logits.shape[1]), dtype=torch.float, device=device)
-                    fake_tracks.refers = torch.randn((1, active_tracks.refers.shape[1]), dtype=torch.float, device=device)
+                    fake_tracks.refers = torch.randn((1, active_tracks.refers.shape[-1]), dtype=torch.float, device=device)
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
