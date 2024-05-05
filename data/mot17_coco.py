@@ -95,7 +95,7 @@ class MOT17_COCO(MOTDataset):
         text_key = self.mot17_data_annotations['text_key']
         for vid in self.mot17_seq_names:
             for t in text_key[vid]:
-                num=int(t)
+                num=int(t)+1
                 sentences= list(text_key[vid][t].keys())
                 for sentence in sentences:
                     for line in text_key[vid][t][sentence]:
