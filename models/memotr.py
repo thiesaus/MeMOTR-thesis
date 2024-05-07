@@ -153,8 +153,8 @@ class MeMOTR(nn.Module):
         src, mask = features[-1].decompose()
         assert mask is not None
         text_word_features, text_word_mask, text_sentence_features = self.forward_text(sentences, src.device)
-        text_word_features = text_word_features.flatten(0, 1).unsqueeze(0)
-        text_word_mask = text_word_mask.flatten(0, 1).unsqueeze(0)
+        # text_word_features = text_word_features.flatten(0, 1).unsqueeze(0)
+        # text_word_mask = text_word_mask.flatten(0, 1).unsqueeze(0)
         text_pos = self.text_pos(NestedTensor(text_word_features, text_word_mask)).permute(2, 0, 1)
         text_word_features = text_word_features.permute(1, 0, 2)
 
