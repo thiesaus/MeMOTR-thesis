@@ -163,7 +163,6 @@ class ClipCriterion:
         detection_res = {
             "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
             "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
-            "pred_refers": model_outputs["pred_refers"][:, :self.n_det_queries, :].detach(),     # (B, Nd, 1)
         }
 
         # 4. Find some gts that do not include in the tracked instances mentioned in (2.),
@@ -295,7 +294,6 @@ class ClipCriterion:
                 aux_det_res = {
                     "pred_logits": aux_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),
                     "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),
-                    "pred_refers": aux_outputs["pred_refers"][:, :self.n_det_queries, :].detach(),
                 }
                 # Same to 5.
                 if i < self.merge_det_track_layer:
@@ -398,7 +396,6 @@ class ClipCriterion:
                 track_mask = model_outputs["query_mask"][b][self.n_det_queries:]
                 tracked_instances[b].boxes = model_outputs["pred_bboxes"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].logits = model_outputs["pred_logits"][b][self.n_det_queries:][~track_mask]
-                tracked_instances[b].refers = model_outputs["pred_refers"][b][self.n_det_queries:][~track_mask]
                 # Query embed and ref_pts will be updated in the query_updater module.
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
@@ -459,33 +456,6 @@ class ClipCriterion:
         )).sum()
         return loss_l1, loss_giou
 
-    def get_loss_refer(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
-        """
-        Compute the referring loss. (need fixing)
-        """
-        pred_refers = [
-            preds[~mask] for preds, mask in zip(outputs["pred_refers"], outputs["query_mask"])
-        ]
-        gt_labels = [
-            torch.full((pred_refers[b].shape[:1]),
-                       self.num_classes,
-                       dtype=torch.int64,
-                       device=self.device) for b in range(len(gt_trackinstances))
-        ]
-        for b in range(len(pred_refers)):
-            gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
-                = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-        pred_refers = torch.cat(pred_refers)
-        gt_labels = torch.cat(gt_labels)
-        gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
-            .to(pred_refers.dtype).to(pred_refers.device)
-
-        loss = sigmoid_focal_loss(inputs=pred_refers,
-                                  targets=gt_labels_one_hot,
-                                  alpha=0.25,
-                                  gamma=2)
-
-        return loss
 
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):

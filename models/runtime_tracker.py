@@ -40,7 +40,6 @@ class RuntimeTracker:
         tracks[0].logits = model_outputs["pred_logits"][0][n_dets:]
         tracks[0].output_embed = model_outputs["outputs"][0][n_dets:]
         tracks[0].scores = logits_to_scores(tracks[0].logits)
-        tracks[0].refers = model_outputs["pred_refers"][0][n_dets:]
         for i in range(len(tracks[0])):
             if tracks[0].scores[i][tracks[0].labels[i]] < self.track_score_thresh:
                 tracks[0].disappear_time[i] += 1
@@ -62,7 +61,6 @@ class RuntimeTracker:
         new_tracks.ref_pts = model_outputs["last_ref_pts"][0][:n_dets][new_tracks_idxes]
         new_tracks.scores = model_outputs["scores"][0][:n_dets][new_tracks_idxes]
         new_tracks.output_embed = model_outputs["outputs"][0][:n_dets][new_tracks_idxes]
-        new_tracks.refers = model_outputs["pred_refers"][0][:n_dets][new_tracks_idxes]
         # new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
         if self.use_dab:
             new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]

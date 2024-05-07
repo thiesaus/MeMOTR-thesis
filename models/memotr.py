@@ -220,7 +220,7 @@ class MeMOTR(nn.Module):
         # outputs: (n_dec_layers, B, Nd+Nq, C)
         # init_reference: (B, Nd+Nq, 2)
         # inter_references: (n_dec_layers, B, Nd+Nq, 4)
-        output_classes, output_bboxes, output_refers = [], [], []
+        output_classes, output_bboxes = [], []
         assert outputs.ndim == 4, f"Deformable Transformer's outputs should have shape (n_dec_layers, B, Nd+Nq, C, " \
                                   f"but get n_dim={outputs.ndim}"
         for level in range(outputs.shape[0]):
@@ -240,7 +240,6 @@ class MeMOTR(nn.Module):
             output_bbox = bbox_tmp.sigmoid()
             output_classes.append(output_class)
             output_bboxes.append(output_bbox)
-            output_refers.append(output_refer)
 
             if self.visualize:
                 torch.save(reference[0, :self.n_det_queries, :].cpu(),
@@ -258,12 +257,10 @@ class MeMOTR(nn.Module):
 
         output_classes = torch.stack(output_classes, dim=0)
         output_bboxes = torch.stack(output_bboxes, dim=0)
-        output_refers = torch.stack(output_refers, dim=0)
-
+        
         res = {
             "pred_logits": output_classes[-1],
             "pred_bboxes": output_bboxes[-1],
-            "pred_refers": output_refers[-1],
             "last_ref_pts": inverse_sigmoid(inter_references[-2, :, :, :]) if self.use_dab       # (B, Nd+Nq, 4)
             else inverse_sigmoid(inter_references[-2, :, :, :]),                                 # (B, Nd+Nq, 2)
             "query_mask": query_mask,                   # (B, Nd+Nq)
@@ -273,22 +270,21 @@ class MeMOTR(nn.Module):
         if self.aux_loss:
             res["aux_outputs"] = self.set_aux_loss(output_classes=output_classes,
                                                    output_bboxes=output_bboxes,
-                                                   output_refers=output_refers,
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         return res
 
     @torch.jit.unused
-    def set_aux_loss(self, output_classes, output_bboxes, output_refers, query_mask, queries):
+    def set_aux_loss(self, output_classes, output_bboxes, query_mask, queries):
         """
         this is a workaround to make torchscript happy, as torchscript
         doesn't support dictionary with non-homogeneous values, such
         as a dict having both a Tensor and a list.
         """
         return [
-            {"pred_logits": a, "pred_bboxes": b, "pred_refers": ref, "query_mask": query_mask, "queries": c}
-            for a, b, c, ref in zip(output_classes[:-1], output_bboxes[:-1], queries[1:], output_refers[:-1])
+            {"pred_logits": a, "pred_bboxes": b, "query_mask": query_mask, "queries": c}
+            for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], queries[1:])
         ]
 
     def get_det_reference_points(self) -> torch.Tensor:
