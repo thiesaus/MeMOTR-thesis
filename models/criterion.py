@@ -268,23 +268,16 @@ class ClipCriterion:
         loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx)
-        
-        # referring loss
-        loss_refer = self.get_loss_refer(outputs=model_outputs,
-                                        gt_trackinstances=gt_trackinstances,
-                                        idx_to_gts_idx=outputs_idx_to_gts_idx)
 
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
         self.loss["box_l1_loss"] += loss_l1 * self.frame_weights[frame_idx]
         self.loss["box_giou_loss"] += loss_giou * self.frame_weights[frame_idx]
         self.loss["label_focal_loss"] += loss_label * self.frame_weights[frame_idx]
-        self.loss["refer_loss"] += loss_refer * self.frame_weights[frame_idx]
         # Update logs.
         self.log[f"frame{frame_idx}_box_l1_loss"] = loss_l1.item()
         self.log[f"frame{frame_idx}_box_giou_loss"] = loss_giou.item()
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
-        self.log[f"frame{frame_idx}_refer_loss"] = loss_refer.item()
         self.n_gts.append(n_gts)
 
         # 11. Compute aux loss.
@@ -322,15 +315,11 @@ class ClipCriterion:
                 aux_loss_l1, aux_loss_giou = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
                                                                idx_to_gts_idx=aux_idx_to_gts_idx)
-                aux_loss_refer = self.get_loss_refer(outputs=model_outputs["aux_outputs"][i],
-                                                     gt_trackinstances=gt_trackinstances,
-                                                     idx_to_gts_idx=aux_idx_to_gts_idx)
-
+            
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
-                self.loss["aux_refer_loss"] += aux_loss_refer * self.frame_weights[frame_idx] * self.aux_weights[i]
-
+            
         # Prepare the unmatched detection results.
         unmatched_detections = []
         for b in range(len(tracked_instances)):
