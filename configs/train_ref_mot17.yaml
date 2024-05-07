@@ -120,3 +120,7 @@ LOSS_WEIGHT_REFER: 2
 
 # COCO MOT17
 TRAIN_COCO: ./data/mot17_train_coco_reforged.json
+
+# DATA SUBSET
+GET_DATA_SUBSET: True
+SUBSET_LENGTH: 15000
