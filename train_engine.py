@@ -46,8 +46,19 @@ def train(config: dict):
     # Data process
     dataset_train = build_dataset(config=config, split="train")
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-    dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                        batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+    dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+                                              batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+
+    if config['GET_DATA_SUBSET'] is True and config['SUBSET_LENGTH'] > 0:
+        print("Running on subset of first {} data samples.".format(config['SUBSET_LENGTH']))
+        from torch.utils.data.sampler import SubsetRandomSampler
+        split = config['SUBSET_LENGTH']
+        indices = list(range(len(dataset_train)))
+        train_indices = indices[:split]
+        sampler_train = SubsetRandomSampler(train_indices)
+        dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+                                                  batch_size=config["BATCH_SIZE"],num_workers=config["NUM_WORKERS"])
+
 
     # Criterion
     criterion = build_criterion(config=config)
@@ -101,11 +112,11 @@ def train(config: dict):
             sampler_train.set_epoch(epoch)
         dataset_train.set_epoch(epoch)
 
-        sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
+        # sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
         # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
         #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
-        dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
-                                                  batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+        # dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+        #                                           batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
             optimizer.param_groups[0]["lr"] = 0.0
