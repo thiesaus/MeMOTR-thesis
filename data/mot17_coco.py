@@ -98,6 +98,10 @@ class MOT17_COCO(MOTDataset):
                 num=int(t)+1
                 sentences= list(text_key[vid][t].keys())
                 for sentence in sentences:
+                    
+                    if sentence == 'null': # sentence is null when there is lack of either appearance or action caption for the person
+                        continue
+
                     for line in text_key[vid][t][sentence]:
                         i= line["track_id"]
                         x, y, w, h = line["bbox"]
