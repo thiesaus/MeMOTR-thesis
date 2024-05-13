@@ -17,6 +17,7 @@ from .utils import get_clones, pos_to_pos_embed
 
 from .backbone import build as build_backbone_with_pe
 from .deformable_transformer import build as build_deformable_transformer
+from .query_initiator import build as build_query_initiator
 
 from utils.nested_tensor import NestedTensor
 from structures.track_instances import TrackInstances
@@ -32,9 +33,11 @@ from .vi_lang_modules import VisionLanguageFusionModule, PositionEmbeddingSine1D
 from einops import rearrange
 import copy
 
+
+
 class MeMOTR(nn.Module):
     def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
-                 query_updater: nn.Module, text_encoder,
+                 query_updater: nn.Module, query_initiator: nn.Module, text_encoder,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
                  aux_loss: bool = True, with_box_refine: bool = True,
@@ -57,25 +60,29 @@ class MeMOTR(nn.Module):
         self.use_dab = use_dab
         self.visualize = visualize
 
-        # referring branch
-        self.refer_embed = nn.Linear(hidden_dim, 1)
+        # # referring branch
+        # self.refer_embed = nn.Linear(hidden_dim, 1)
 
-        self.tokenizer, self.text_encoder = text_encoder
+        # self.tokenizer, self.text_encoder = text_encoder
 
-        self.txt_proj = FeatureResizer(
-            input_feat_size=self.text_encoder.config.hidden_size,
-            output_feat_size=hidden_dim,
-            dropout=True,
-        )
+        # self.txt_proj = FeatureResizer(
+        #     input_feat_size=self.text_encoder.config.hidden_size,
+        #     output_feat_size=hidden_dim,
+        #     dropout=True,
+        # )
 
-        self.fusion_module = VisionLanguageFusionModule(d_model=hidden_dim, nhead=8)
-        self.text_pos = PositionEmbeddingSine1D(hidden_dim, normalize=True)
+        # self.fusion_module = VisionLanguageFusionModule(d_model=hidden_dim, nhead=8)
+        # self.text_pos = PositionEmbeddingSine1D(hidden_dim, normalize=True)
 
 
         # Net:
         self.backbone = backbone
         self.transformer = transformer
         self.query_updater = query_updater
+
+        # (new)
+        self.query_initiator = query_initiator
+
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
         if self.use_dab:
@@ -104,7 +111,7 @@ class MeMOTR(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
-        self.refer_embed.bias.data = torch.ones(1) * bias_value
+        # self.refer_embed.bias.data = torch.ones(1) * bias_value
         for proj in self.feature_projs:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
@@ -115,12 +122,12 @@ class MeMOTR(nn.Module):
             self.bbox_embed = get_clones(self.bbox_embed, self.transformer.get_n_dec_layers())
             nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
             self.transformer.set_refine_bbox_embed(self.bbox_embed)
-            self.refer_embed = nn.ModuleList([copy.deepcopy(self.refer_embed) for i in range(num_pred)])
+            # self.refer_embed = nn.ModuleList([copy.deepcopy(self.refer_embed) for i in range(num_pred)])
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
-            self.refer_embed = nn.ModuleList([self.refer_embed for _ in range(num_pred)])
+            # self.refer_embed = nn.ModuleList([self.refer_embed for _ in range(num_pred)])
 
     def forward_text(self,
                      text_queries: List[str],
@@ -139,7 +146,7 @@ class MeMOTR(nn.Module):
     def forward(self, 
                 frame: NestedTensor, 
                 tracks: list[TrackInstances],
-                sentences):
+                sentences = None):
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
@@ -159,26 +166,58 @@ class MeMOTR(nn.Module):
         text_word_features = text_word_features.permute(1, 0, 2)
 
         srcs, masks = [], []
+
+        # vi-lang early fusion (in RMOT)
+        # for layer, feat in enumerate(features):
+        #     src, mask = feat.decompose()
+
+        #     # add textual processing steps
+        #     src_proj_l = self.feature_projs[layer](src)
+        #     n, c, h, w = src_proj_l.shape
+        #     # vision-language fusion
+        #     src_proj_l = rearrange(src_proj_l, 'b c h w -> (h w) b c')
+        #     src_proj_l = self.fusion_module(tgt=src_proj_l,
+        #                                     memory=text_word_features,
+        #                                     memory_key_padding_mask=text_word_mask,
+        #                                     pos=text_pos,
+        #                                     query_pos=None)
+        #     src_proj_l = rearrange(src_proj_l, '(h w) b c -> b c h w', h=h, w=w)
+
+        #     srcs.append(src_proj_l)
+        #     masks.append(mask)
+
+        # vanilla 
         for layer, feat in enumerate(features):
             src, mask = feat.decompose()
-
-            # add textual processing steps
-            src_proj_l = self.feature_projs[layer](src)
-            n, c, h, w = src_proj_l.shape
-            # vision-language fusion
-            src_proj_l = rearrange(src_proj_l, 'b c h w -> (h w) b c')
-            src_proj_l = self.fusion_module(tgt=src_proj_l,
-                                            memory=text_word_features,
-                                            memory_key_padding_mask=text_word_mask,
-                                            pos=text_pos,
-                                            query_pos=None)
-            src_proj_l = rearrange(src_proj_l, '(h w) b c -> b c h w', h=h, w=w)
-
-            srcs.append(src_proj_l)
+            srcs.append(self.feature_projs[layer](src))
             masks.append(mask)
 
         if self.n_feature_levels > len(srcs):
             srcs_len = len(srcs)
+
+            ## vi-lang early fusion (in RMOT)
+            # for layer in range(srcs_len, self.n_feature_levels):
+            #     if layer == srcs_len:
+            #         src = self.feature_projs[layer](features[-1].tensors)
+            #     else:
+            #         src = self.feature_projs[layer](srcs[-1])
+            #     mask = frame.masks
+            #     mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
+            #     pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+
+            #     # add similar textual processing steps
+            #     n,c,h,w = src.shape
+            #     src = rearrange(src, 'b c h w -> (h w) b c')
+            #     src = self.fusion_module(tgt=src,
+            #                              memory=text_word_features,
+            #                              memory_key_padding_mask=text_word_mask,
+            #                              pos=text_pos,
+            #                              query_pos=None)
+            #     src = rearrange(src, '(h w) b c -> b c h w', h=h, w=w)
+            #     srcs.append(src)
+            #     masks.append(mask)
+
+            # vanilla
             for layer in range(srcs_len, self.n_feature_levels):
                 if layer == srcs_len:
                     src = self.feature_projs[layer](features[-1].tensors)
@@ -187,16 +226,6 @@ class MeMOTR(nn.Module):
                 mask = frame.masks
                 mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
                 pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
-
-                # add similar textual processing steps
-                n,c,h,w = src.shape
-                src = rearrange(src, 'b c h w -> (h w) b c')
-                src = self.fusion_module(tgt=src,
-                                         memory=text_word_features,
-                                         memory_key_padding_mask=text_word_mask,
-                                         pos=text_pos,
-                                         query_pos=None)
-                src = rearrange(src, '(h w) b c -> b c h w', h=h, w=w)
                 srcs.append(src)
                 masks.append(mask)
         # srcs is n_feature_levels * [(B, C, H, W)]
@@ -213,7 +242,7 @@ class MeMOTR(nn.Module):
             masks=masks,
             pos_embeds=pos,
             query_embed=query_embed,
-            prompt_embed=text_sentence_features,
+            prompt_embed=None, # text_sentence_features,
             ref_pts=reference_points,
             query_mask=query_mask
         )
@@ -231,7 +260,7 @@ class MeMOTR(nn.Module):
             reference = inverse_sigmoid(reference)
             output_class = self.class_embed[level](outputs[level])
             bbox_tmp = self.bbox_embed[level](outputs[level])
-            output_refer = self.refer_embed[level](outputs[level])
+            # output_refer = self.refer_embed[level](outputs[level])
             if reference.shape[-1] == 4:
                 bbox_tmp += reference
             else:
@@ -343,6 +372,7 @@ class MeMOTR(nn.Module):
         else:
             det_query_embed = self.det_query_embed.repeat(len(tracks), 1, 1)                    # (B, Nd, 2C)
         track_query_embed = self.get_track_query_embed(tracks).to(det_query_embed.device)       # (B, Nq, 2C)
+        track_query_embed = self.query_initiator(track_query_embed)
         return torch.cat((det_query_embed, track_query_embed), dim=1)
 
     def get_query_mask(self, tracks: list[TrackInstances]):
@@ -384,11 +414,13 @@ def build(config: dict):
     deformable_transformer = build_deformable_transformer(config=config)
     query_updater = build_query_updater(config=config)
     text_encoder = build_text_encoder(config=config)
+    query_initiator = build_query_initiator(config=config)
 
     return MeMOTR(
         backbone=backbone_with_pe,
         transformer=deformable_transformer,
         query_updater=query_updater,
+        query_initiator=query_initiator,
         text_encoder=text_encoder,
         num_classes=num_classes,
         n_det_queries=config["NUM_DET_QUERIES"],
