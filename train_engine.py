@@ -47,6 +47,17 @@ def train(config: dict):
     dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
                                         batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
+    if config['GET_DATA_SUBSET'] is True and config['SUBSET_LENGTH'] > 0:
+        print("Running on subset of first {} data samples.".format(config['SUBSET_LENGTH']))
+        from torch.utils.data.sampler import SubsetRandomSampler
+        split = config['SUBSET_LENGTH']
+        indices = list(range(len(dataset_train)))
+        train_indices = indices[:split]
+        sampler_train = SubsetRandomSampler(train_indices)
+        dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+                                            batch_size=config["BATCH_SIZE"],num_workers=config["NUM_WORKERS"])
+
+
     # Criterion
     criterion = build_criterion(config=config)
     criterion.set_device(torch.device("cuda", distributed_rank()))
@@ -99,9 +110,11 @@ def train(config: dict):
             sampler_train.set_epoch(epoch)
         dataset_train.set_epoch(epoch)
 
-        sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-        dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                            batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+        # sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
+        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+        #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+        #                                           batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
             optimizer.param_groups[0]["lr"] = 0.0
@@ -190,11 +203,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
 
-    # pseudo sentences
-    # TODO: get real sentences from dataloader
-    sentences = ["a photo of a human"]
-
     for i, batch in enumerate(dataloader):
+
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
@@ -206,6 +216,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                               device=device)
 
         for frame_idx in range(len(batch["imgs"][0])):
+            sentences = batch["infos"][0][frame_idx]["sentences"]
             if no_grad_frames is None or frame_idx >= no_grad_frames:
                 frame = [fs[frame_idx] for fs in batch["imgs"]]
                 for f in frame:
