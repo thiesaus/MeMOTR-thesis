@@ -46,8 +46,8 @@ def train(config: dict):
     # Data process
     dataset_train = build_dataset(config=config, split="train")
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-    dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
-                                              batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+    dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+                                        batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
     if config['GET_DATA_SUBSET'] is True and config['SUBSET_LENGTH'] > 0:
         print("Running on subset of first {} data samples.".format(config['SUBSET_LENGTH']))
@@ -56,8 +56,8 @@ def train(config: dict):
         indices = list(range(len(dataset_train)))
         train_indices = indices[:split]
         sampler_train = SubsetRandomSampler(train_indices)
-        dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
-                                                  batch_size=config["BATCH_SIZE"],num_workers=config["NUM_WORKERS"])
+        dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+                                            batch_size=config["BATCH_SIZE"],num_workers=config["NUM_WORKERS"])
 
 
     # Criterion
@@ -115,7 +115,7 @@ def train(config: dict):
         # sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
         # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
         #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
-        # dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
         #                                           batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
@@ -205,16 +205,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
 
-    # # pseudo sentences
-    # # TODO: get real sentences from dataloader
-    # sentences = ["a photo of a human"]
-
     for i, batch in enumerate(dataloader):
-        sentences = batch["sentence"]
-
-        ## visualize the batch
-        # visualize_a_batch_w_sen(batch)
-        # continue
 
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
@@ -227,6 +218,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                               device=device)
 
         for frame_idx in range(len(batch["imgs"][0])):
+            sentences = batch["infos"][0][frame_idx]["sentences"]
             if no_grad_frames is None or frame_idx >= no_grad_frames:
                 frame = [fs[frame_idx] for fs in batch["imgs"]]
                 for f in frame:
