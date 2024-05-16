@@ -138,10 +138,11 @@ class MOT17_COCO(MOTDataset):
         return len(self.sample_begin_frame_paths )
 
     def __getitem__(self, item):
-        begin_sentence = self.sample_begin_frame_paths[item]["sentence"]
-        begin_frame_path = self.sample_begin_frame_paths[item]["path"]
+        # begin_sentence = self.sample_begin_frame_paths[item]["sentence"]
+        # begin_frame_path = self.sample_begin_frame_paths[item]["path"]
+        begin_frame_path = self.sample_begin_frame_paths[item]
         frame_paths = self.sample_frame_paths(begin_frame_path=begin_frame_path)
-        imgs, infos = self.get_multi_frames(frame_paths=frame_paths,sentence=begin_sentence)
+        imgs, infos = self.get_multi_frames(frame_paths=frame_paths,sentence=None)
 
         if infos[0]["dataset"] == "MOT17":
             imgs, infos = self.transform["MOT17"](imgs, infos)
@@ -150,7 +151,6 @@ class MOT17_COCO(MOTDataset):
 
         return {
             "imgs": imgs,
-            "sentence": begin_sentence,
             "infos": infos
         }
 
@@ -178,13 +178,16 @@ class MOT17_COCO(MOTDataset):
                 t_max = max(map(int,self.mot17_gts[vid].keys()))
                 self.sample_vid_tmax[vid] = t_max
                 for t in range(t_min, t_max - (self.sample_length - 1) + 1):
-                    for sen in list(self.mot17_gts[vid][t].keys()):
-                        sample=defaultdict()
-                        sample["path"] = os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
-                        sample["sentence"] = sen
-                        self.sample_begin_frame_paths.append(
-                           sample
-                        )
+                    # for sen in list(self.mot17_gts[vid][t].keys()):
+                    #     sample=defaultdict()
+                    #     sample["path"] = os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
+                    #     sample["sentence"] = sen
+                    #     self.sample_begin_frame_paths.append(
+                    #        sample
+                    #     )
+                    self.sample_begin_frame_paths.append(
+                        os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
+                    )
                 
         if self.use_motsynth:
             multi_random_state = random.getstate()
@@ -234,7 +237,8 @@ class MOT17_COCO(MOTDataset):
             if "MOTSynth" in frame_path:
                 gt = self.motsynth_gts[vid][frame_idx]
             else:
-                gt = self.mot17_gts[vid][frame_idx][sentence]
+                # gt = self.mot17_gts[vid][frame_idx][sentence]
+                gt = self.mot17_gts[vid][frame_idx]
         else:
             raise RuntimeError(f"Frame path '{frame_path}' has no GTs.")
         img = Image.open(frame_path)
@@ -247,17 +251,22 @@ class MOT17_COCO(MOTDataset):
         info["ids"] = list()
         info["labels"] = list()
         info["areas"] = list()
+        info["sentences"] = list()
         info["dataset"] = "MOT17" if ("MOT17" in frame_path or "MOTSynth" in frame_path) else "CrowdHuman"
 
-        for i, x, y, w, h in gt:
-            info["boxes"].append(list(map(float, (x, y, w, h))))
-            info["areas"].append(w * h)
-            info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
-            info["labels"].append(0)
+        for sen in gt:
+            for i, x, y, w, h in gt[sen]:
+                info["boxes"].append(list(map(float, (x, y, w, h))))
+                info["areas"].append(w * h)
+                info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
+                info["labels"].append(0)
+                info["sentences"].append(sen)
+
         info["boxes"] = torch.as_tensor(info["boxes"])
         info["areas"] = torch.as_tensor(info["areas"])
         info["ids"] = torch.as_tensor(info["ids"], dtype=torch.long)
         info["labels"] = torch.as_tensor(info["labels"], dtype=torch.long)
+        
         # xywh to xyxy
         if len(info["boxes"]) > 0:
             info["boxes"][:, 2:] += info["boxes"][:, :2]
@@ -265,6 +274,8 @@ class MOT17_COCO(MOTDataset):
             info["boxes"] = torch.zeros((0, 4))
             info["ids"] = torch.zeros((0, ), dtype=torch.long)
             info["labels"] = torch.zeros((0, ), dtype=torch.long)
+
+        info['frame_path'] = frame_path # for debugging
 
         return img, info
 
