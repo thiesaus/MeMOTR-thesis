@@ -57,9 +57,10 @@ def build(config):
     assert model_name is not None, f"Model {config['MODEL_NAME']} not supported"
 
     if model_name == 'roberta-base':
-        return build_roberta(config)
+        return model_name, build_roberta(config)
     
     if model_name in ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 'ViT-B/32', 'ViT-B/16', 'ViT-L/14', 'ViT-L/14@336px']:
-        return build_clip(config)
+        config['MODEL_NAME'] = model_name
+        return model_name, build_clip(config)
     
     raise NotImplementedError(f"Model {model_name} not implemented")
