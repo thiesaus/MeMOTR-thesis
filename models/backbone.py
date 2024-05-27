@@ -133,5 +133,5 @@ class BackboneWithPE(nn.Module):
 
 def build(config: dict) -> BackboneWithPE:
     position_embedding = build_position_embedding(config=config)
-    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True)
+    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=config['TRAIN_BACKBONE'], return_interm_layers=True)
     return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
