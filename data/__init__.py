@@ -19,6 +19,7 @@ from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 from .dancetrack import build as build_dancetrack
 from .mot17 import build as build_mot17
 from .mot17_coco import build as build_mot17_coco
+from .mot17_coco_prompt import build as build_mot17_prompt_coco
 from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
 from .utils import collate_fn, collate_fn_w_sen
@@ -36,6 +37,8 @@ def build_dataset(config: dict, split: str) -> MOTDataset:
         return build_mot17(config=config, split=split)
     elif config["DATASET"] == "MOT17_COCO":
         return build_mot17_coco(config=config, split=split)
+    elif config["DATASET"] == "MOT17PromptCOCO":
+        return build_mot17_prompt_coco(config=config, split=split)
     elif config["DATASET"] == "BDD100K":
         return build_bbd100k(config=config, split=split)
     else:
