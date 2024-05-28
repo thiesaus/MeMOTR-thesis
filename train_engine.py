@@ -41,13 +41,17 @@ def train(config: dict):
 
     # Load Pretrained Model
     if config["PRETRAINED_MODEL"] is not None:
-        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=True)
+        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=False)
 
     # Data process
     dataset_train = build_dataset(config=config, split="train")
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-    dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                        batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+    # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
+    #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+    dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+                                              batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+
+
 
     if config['GET_DATA_SUBSET'] is True and config['SUBSET_LENGTH'] > 0:
         print("Running on subset of first {} data samples.".format(config['SUBSET_LENGTH']))
@@ -206,7 +210,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     epoch_start_timestamp = time.time()
 
     for i, batch in enumerate(dataloader):
-
+        sentence = batch['sentence']
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
@@ -218,13 +222,13 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                               device=device)
 
         for frame_idx in range(len(batch["imgs"][0])):
-            sentences = batch["infos"][0][frame_idx]["sentences"]
+            # sentences = batch["infos"][0][frame_idx]["sentences"]
             if no_grad_frames is None or frame_idx >= no_grad_frames:
                 frame = [fs[frame_idx] for fs in batch["imgs"]]
                 for f in frame:
                     f.requires_grad_(False)
                 frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                res = model(frame=frame, tracks=tracks, sentences=sentences)
+                res = model(frame=frame, tracks=tracks, sentences=sentence)
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,
@@ -239,7 +243,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     for f in frame:
                         f.requires_grad_(False)
                     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                    res = model(frame=frame, tracks=tracks, sentences=sentences)
+                    res = model(frame=frame, tracks=tracks, sentences=sentence)
                     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                         model_outputs=res,
                         tracked_instances=tracks,
