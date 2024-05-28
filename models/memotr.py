@@ -406,6 +406,7 @@ def build(config: dict):
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
         "MOT17_COCO": 1,
+        "MOT17PromptCOCO": 1
     }
     assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
     num_classes = dataset_num_classes[config["DATASET"]]
