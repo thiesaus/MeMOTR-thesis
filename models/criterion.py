@@ -26,7 +26,7 @@ from utils.utils import is_distributed, distributed_world_size
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True):
+                 hidden_dim: int = 256, use_dab: bool = True, temperature: float = 4.0):
         """
         Init a criterion function.
 
@@ -50,6 +50,9 @@ class ClipCriterion:
         self.aux_weights = aux_weights                      # different weights for different DETR layers
         self.hidden_dim = hidden_dim
         self.merge_det_track_layer = merge_det_track_layer
+        self.max_text_length = 256
+        # (new)
+        self.temperature = None
 
         self.gt_trackinstances_list: None | List[List[TrackInstances]] = None     # (clip_size, B)
         self.loss = {}
@@ -73,6 +76,10 @@ class ClipCriterion:
         clip_size = len(batch["imgs"][0])
         batch_size = len(batch["imgs"])
         self.gt_trackinstances_list = []
+        
+        # (new)
+        self.temperature = torch.rand(1, requires_grad=True, device=self.device) * 2
+
         for c in range(clip_size):
             gt_trackinstances = TrackInstances.init_tracks(batch, hidden_dim=hidden_dim,
                                                            num_classes=num_classes, device=self.device)
@@ -86,21 +93,20 @@ class ClipCriterion:
         self.n_gts = []
         if self.aux_loss:
             self.loss = {
+                "tau": self.temperature, # (new)
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
-                "refer_loss": torch.zeros(()).to(self.device),
                 "aux_box_l1_loss": torch.zeros(()).to(self.device),
                 "aux_box_giou_loss": torch.zeros(()).to(self.device),
                 "aux_label_focal_loss": torch.zeros(()).to(self.device),
-                "aux_refer_loss": torch.zeros(()).to(self.device)
             }
         else:
             self.loss = {
+                "tau": self.temperature, # (new)
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
-                "refer_loss": torch.zeros(()).to(self.device),
             }
         return
 
@@ -112,8 +118,8 @@ class ClipCriterion:
                 return self.weight["box_giou_loss"]
             elif "label_focal_loss" in loss_name:
                 return self.weight["label_focal_loss"]
-            elif "refer_loss" in loss_name:
-                return self.weight["refer_loss"]
+            else:
+                return 0
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -162,7 +168,7 @@ class ClipCriterion:
         # 3. Get the detection results in current frame.
         detection_res = {
             "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
-            "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
+            "pred_boxes": model_outputs["pred_boxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
         }
 
         # 4. Find some gts that do not include in the tracked instances mentioned in (2.),
@@ -217,26 +223,30 @@ class ClipCriterion:
             trackinstances = TrackInstances(frame_height=tracked_instances[b].frame_height,
                                             frame_width=tracked_instances[b].frame_width,
                                             hidden_dim=tracked_instances[b].hidden_dim,
-                                            num_classes=self.num_classes)
+                                            # num_classes=self.num_classes)
+                                            num_classes=self.max_text_length) # (new)
             output_idx, gt_idx = matcher_res[b]
             gt_ids = untracked_gt_trackinstances[b].ids[gt_idx]
             gt_idx = torch.as_tensor([gt_ids_to_idx[b][gt_id.item()] for gt_id in gt_ids], dtype=torch.long)
             trackinstances.ids = gt_ids
             trackinstances.matched_idx = gt_idx
-            # trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
-            if self.use_dab:
-                trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
-            else:
-                trackinstances.query_embed = torch.cat(
-                    (
-                        model_outputs["det_query_embed"][output_idx][:, :self.hidden_dim],
-                        model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
-                    ),
-                    dim=-1
-                )
+            # # trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
+            # if self.use_dab:
+            #     trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
+            # else:
+            #     trackinstances.query_embed = torch.cat(
+            #         (
+            #             model_outputs["det_query_embed"][output_idx][:, :self.hidden_dim],
+            #             model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
+            #         ),
+            #         dim=-1
+            #     )
+            # (new)
+            trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
+
             trackinstances.ref_pts = model_outputs["last_ref_pts"][b][output_idx]
             trackinstances.output_embed = model_outputs["outputs"][b][output_idx]
-            trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
+            trackinstances.boxes = model_outputs["pred_boxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
             trackinstances = trackinstances.to(self.device)
@@ -286,7 +296,7 @@ class ClipCriterion:
                 # Same to 3.
                 aux_det_res = {
                     "pred_logits": aux_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),
-                    "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),
+                    "pred_boxes": aux_outputs["pred_boxes"][:, :self.n_det_queries, :].detach(),
                 }
                 # Same to 5.
                 if i < self.merge_det_track_layer:
@@ -334,18 +344,21 @@ class ClipCriterion:
             detections.ref_pts = model_outputs["init_ref_pts"][b][unmatched_indexes]
             detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
-            detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
-            # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
-            if self.use_dab:
-                detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
-            else:
-                detections.query_embed = torch.cat(
-                    (
-                        model_outputs["det_query_embed"][unmatched_indexes][:, :self.hidden_dim],
-                        model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
-                    ),
-                    dim=-1
-                )
+            detections.boxes = model_outputs["pred_boxes"][b][unmatched_indexes]
+            # # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
+            # if self.use_dab:
+            #     detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
+            # else:
+            #     detections.query_embed = torch.cat(
+            #         (
+            #             model_outputs["det_query_embed"][unmatched_indexes][:, :self.hidden_dim],
+            #             model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
+            #         ),
+            #         dim=-1
+            #     )
+            # (new)
+            detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
+
             detections.ids = -torch.ones((len(detections.query_embed),), dtype=torch.long, device=self.device)
             detections.matched_idx = -torch.ones((len(detections.query_embed),), dtype=torch.long, device=self.device)
             detections.iou = torch.zeros((len(detections.ids,)), dtype=torch.float, device=self.device)
@@ -371,7 +384,6 @@ class ClipCriterion:
                                    [tracked_instances[b][tracked_instances[b].matched_idx >= 0]
                                    .matched_idx].boxes)
             )[0])
-            pass
 
         return tracked_instances, new_trackinstances, unmatched_detections
 
@@ -383,7 +395,7 @@ class ClipCriterion:
         for b in range(len(tracked_instances)):
             if len(tracked_instances[b]) > 0:
                 track_mask = model_outputs["query_mask"][b][self.n_det_queries:]
-                tracked_instances[b].boxes = model_outputs["pred_bboxes"][b][self.n_det_queries:][~track_mask]
+                tracked_instances[b].boxes = model_outputs["pred_boxes"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].logits = model_outputs["pred_logits"][b][self.n_det_queries:][~track_mask]
                 # Query embed and ref_pts will be updated in the query_updater module.
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
@@ -399,24 +411,30 @@ class ClipCriterion:
         pred_logits = [
             preds[~mask] for preds, mask in zip(outputs["pred_logits"], outputs["query_mask"])
         ]
-        gt_labels = [
-            torch.full((pred_logits[b].shape[:1]),
-                       self.num_classes,
-                       dtype=torch.int64,
-                       device=self.device) for b in range(len(gt_trackinstances))
-        ]
-        for b in range(len(pred_logits)):
-            gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
-                = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+        # gt_labels = [
+        #     torch.full((pred_logits[b].shape[:1]),
+        #                self.num_classes,
+        #                dtype=torch.int64,
+        #                device=self.device) for b in range(len(gt_trackinstances))
+        # ]
+        # for b in range(len(pred_logits)):
+        #     gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
+        #         = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
         pred_logits = torch.cat(pred_logits)
-        gt_labels = torch.cat(gt_labels)
-        gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
-            .to(pred_logits.dtype).to(pred_logits.device)
+        # gt_labels = torch.cat(gt_labels)
+        # gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
+        #     .to(pred_logits.dtype).to(pred_logits.device)
 
-        loss = sigmoid_focal_loss(inputs=pred_logits,
-                                  targets=gt_labels_one_hot,
-                                  alpha=0.25,
-                                  gamma=2)
+        targets = torch.zeros_like(pred_logits)
+
+        # loss = sigmoid_focal_loss(inputs=pred_logits,
+        #                           targets=targets, # (old) gt_labels_one_hot
+        #                           alpha=0.25,
+        #                           gamma=2,
+        #                           tau=self.temperature)
+
+        # loss = my_loss(inputs=pred_logits, targets=targets, tau=self.temperature)
+        loss = token_sigmoid_binary_focal_loss(outputs=outputs, indices=idx_to_gts_idx, alpha=0.25, gamma=2)
 
         return loss
 
@@ -427,7 +445,7 @@ class ClipCriterion:
         """
         matched_pred_boxes = [
             boxes[outputs_idx[0][outputs_idx[1] >= 0]]
-            for boxes, outputs_idx in zip(outputs["pred_bboxes"], idx_to_gts_idx)
+            for boxes, outputs_idx in zip(outputs["pred_boxes"], idx_to_gts_idx)
         ]
         gt_boxes = [
             gt_trackinstances[b].boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
@@ -447,7 +465,7 @@ class ClipCriterion:
 
 
 
-def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
+def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2, tau: float = 1):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -460,11 +478,19 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
                 positive vs negative examples. Default = -1 (no weighting).
         gamma: Exponent of the modulating factor (1 - p_t) to
                balance easy vs hard examples.
+
+        # (new) tau: Temperature scaling for the logits.
+        # little trick from https://discuss.pytorch.org/t/how-to-set-nan-in-tensor-to-0/3918 to resolve NaN tensor.
     Returns:
         Loss tensor
     """
-    prob = inputs.sigmoid()
-    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    prob = inputs.sigmoid() / tau
+    # ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    ce_loss = F.binary_cross_entropy(inputs.sigmoid(), targets, reduction="none")
+
+    if torch.isnan(ce_loss).any():
+        ce_loss[ce_loss != ce_loss] = 0
+
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
 
@@ -472,7 +498,49 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    return loss.mean(1).sum()   # 在类别上计算平均
+    if torch.isnan(loss).any():
+        loss[loss != loss] = 0
+
+    return loss.mean(1).sum()   # (n_queries, hidden_dim) -> (n_queries,) -> scalar
+
+def my_loss(inputs, targets, tau):
+    logits = inputs.sigmoid() / tau
+    logits = F.normalize(logits, dim=-1)
+    return F.cross_entropy(logits, targets, reduction='none').mean(1).sum()
+
+
+def token_sigmoid_binary_focal_loss(outputs, indices, alpha, gamma):
+    pred_logits = outputs['pred_logits']
+    # new_targets = outputs['one_hot'].to(pred_logits.device).float()
+    new_targets = torch.zeros_like(pred_logits,device=pred_logits.device, dtype=torch.float)
+    text_mask   = outputs['text_mask']
+
+    assert (new_targets.dim() == 3)
+    assert (pred_logits.dim() == 3)  # batch x from x to
+    
+    bs, n, _ = pred_logits.shape
+    if text_mask is not None:
+        # ODVG: each sample has different mask 
+        text_mask = text_mask.repeat(1, pred_logits.size(1)).view(outputs['text_mask'].shape[0],-1,outputs['text_mask'].shape[1])
+        pred_logits = torch.masked_select(pred_logits, text_mask)
+        new_targets = torch.masked_select(new_targets, text_mask)
+
+    p = torch.sigmoid(pred_logits)
+    ce_loss = F.binary_cross_entropy_with_logits(pred_logits, new_targets, reduction="none")
+    p_t = p * new_targets + (1 - p) * (1 - new_targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * new_targets + (1 - alpha) * (1 - new_targets)
+        loss = alpha_t * loss
+
+    total_num_pos = 0
+    for batch_indices in indices:
+        total_num_pos += len(batch_indices[0])
+    num_pos_avg_per_gpu = max(total_num_pos , 1.0)
+    loss = loss.sum() / num_pos_avg_per_gpu
+    
+    return loss
 
 
 def build(config: dict):
@@ -494,7 +562,7 @@ def build(config: dict):
             "box_l1_loss": config["LOSS_WEIGHT_L1"],
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
             "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
-            "refer_loss": config["LOSS_WEIGHT_REFER"]
+            # "refer_loss": config["LOSS_WEIGHT_REFER"]
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,

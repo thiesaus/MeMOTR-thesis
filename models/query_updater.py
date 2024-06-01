@@ -269,3 +269,17 @@ def build(config: dict):
             visualize=config["VISUALIZE"]
         )
 
+def build_gdino_style(config: dict):
+    return QueryUpdater(
+            hidden_dim=config.hidden_dim,
+            ffn_dim=config.dim_feedforward,
+            dropout=config.dropout,
+            tp_drop_ratio=0.0,
+            fp_insert_ratio=0.0,
+            use_checkpoint=config.use_checkpoint,
+            use_dab=config.use_dab,
+            update_threshold=config.update_threshold,
+            long_memory_lambda=config.long_memory_lambda,
+            visualize=config.visualize
+        )
+
