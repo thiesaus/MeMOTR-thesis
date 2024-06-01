@@ -216,9 +216,9 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
     for i, batch in enumerate(dataloader):
         # load sentence
         sentence = batch['sentence']
-        if type(sentence) == list: 
-            assert len(sentence) == 1
-            sentence = sentence[0]
+        # if type(sentence) == list: 
+        #     assert len(sentence) == 1
+        #     sentence = sentence[0]
 
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
