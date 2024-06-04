@@ -510,9 +510,10 @@ def my_loss(inputs, targets, tau):
 
 
 def token_sigmoid_binary_focal_loss(outputs, indices, alpha, gamma):
+    # TODO: need review
     pred_logits = outputs['pred_logits']
     # new_targets = outputs['one_hot'].to(pred_logits.device).float()
-    new_targets = torch.zeros_like(pred_logits,device=pred_logits.device, dtype=torch.float)
+    new_targets = torch.zeros_like(pred_logits, device=pred_logits.device, dtype=torch.float) + 1e-2
     text_mask   = outputs['text_mask']
 
     assert (new_targets.dim() == 3)
