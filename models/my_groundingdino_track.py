@@ -130,6 +130,12 @@ class GroundingDINO(nn.Module):
         self.bert.pooler.dense.bias.requires_grad_(False)
         self.bert = BertModelWarper(bert_model=self.bert)
 
+        # (new) add Image-Text Matching (ITM) layer (like BLIP)
+        self.itm_head = nn.Linear(self.bert.config.hidden_size, 2)
+
+        # (new) add visualizer
+        self.visualize = True
+
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
         nn.init.constant_(self.feat_map.bias.data, 0)
         nn.init.xavier_uniform_(self.feat_map.weight.data)
@@ -451,7 +457,17 @@ class GroundingDINO(nn.Module):
                 layer_cls_embed(layer_hs, text_dict)
                 for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
             ]
-        )
+        ) # (n_dec_layers, bs, num_queries, C)
+
+        if self.visualize:
+            import os
+            os.makedirs("./outputs/visualize_tmp/gdino/", exist_ok=True)
+            for lid, layer in enumerate(outputs_class):
+                for bs in range(layer.shape[0]):
+                    torch.save(layer[bs].cpu(), f"./outputs/visualize_tmp/gdino/cls_{lid}_{bs}.tensor")
+
+        # (new) ITM head
+        itm_logits = self.itm_head(bert_output["last_hidden_state"][:, 0, :])  # (bs, 2)
 
         out = {
             "outputs": hs[-1],                                      # (new) (bs, Nd+Nq, C)
@@ -461,6 +477,7 @@ class GroundingDINO(nn.Module):
             "det_query_embed": query_embed[0][:self.num_queries],   # (new) (Nd, C) 
             "last_ref_pts": inverse_sigmoid(reference[-2]),         # (new) (bs, Nd+Nq, 4)
             "init_ref_pts": inverse_sigmoid(reference[0]),          # (new) (bs, Nq+Nq, 4)
+            "itm_logits": itm_logits,                               # (new) (bs, 2) (ITM head)
         }
 
         # (new) ref: https://github.com/longzw1997/Open-GroundingDino/blob/main/models/GroundingDINO/groundingdino.py
@@ -474,6 +491,8 @@ class GroundingDINO(nn.Module):
 
         out['token'] = tokenized
 
+        # for debugging
+        out['tokenizer'] = self.tokenizer
 
         # for intermediate outputs
         if self.aux_loss:

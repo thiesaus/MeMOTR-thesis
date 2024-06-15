@@ -168,6 +168,9 @@ class MultiRandomCrop:
                 
                 # (new)
                 # info["sentences"] = [info["sentences"][i] for i, keep in enumerate(keep_idxs) if keep]
+                if "ref_exist" in info:
+                    info["ref_exist"] = info["ref_exist"][keep_idxs]
+
             return cropped_img, info
 
         return zip(*[crop(img, info, ijhw=crop_ijhw) for img, info in zip(imgs, infos)])
@@ -205,6 +208,11 @@ class MultiRandomShift:
 
                 for field in ["labels", "ids", "boxes", "areas"]:
                     info[field] = info[field][keep_idxs]
+
+                # (new)
+                if "ref_exist" in info:
+                    info["ref_exist"] = info["ref_exist"][keep_idxs]
+                    
             return cropped_image, info
 
         for i in range(1, n_frames):

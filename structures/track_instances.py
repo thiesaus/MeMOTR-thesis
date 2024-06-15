@@ -36,6 +36,9 @@ class TrackInstances:
         self.long_memory = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.last_appear_boxes = torch.zeros((0, 4))
 
+        # (new) refer task
+        self.ref_exist = torch.zeros((0,), dtype=torch.long)
+
     def to(self, device):
         res = TrackInstances(frame_height=self.frame_height, frame_width=self.frame_width,
                              hidden_dim=self.hidden_dim, num_classes=self.num_classes)
