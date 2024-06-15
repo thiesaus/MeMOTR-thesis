@@ -180,6 +180,48 @@ def train(config: dict):
     return
 
 
+from utils.box_ops import box_cxcywh_to_xyxy
+import torchvision.transforms as T
+
+
+def get_local_images_in_batch(batch: dict, device) -> List[torch.Tensor]:
+    assert 'infos' in batch
+    
+    def transform_crop_img(img: torch.Tensor, input_size: Tuple[int, int] = (224, 224)):
+        # including resize and normalize
+        transforms = T.Compose([
+            T.Resize(input_size),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # ImageNet mean and std
+        ])
+        return transforms(img)
+    
+
+    local_images: list[torch.Tensor] = []
+    for b in range(len(batch['infos'])):
+        list_crop_imgs = []
+
+        boxes = [batch['infos'][b][i]['boxes'] for i in range(len(batch['infos'][b]))] # (num_frame_idx, num_boxes, 4)
+        hs, ws, int_boxes = [], [], []
+        for i in range(len(boxes)):
+            # TODO: need to review
+            _, h, w = batch['infos'][b][i]['unnorm_img'].shape
+            int_boxes.append((box_cxcywh_to_xyxy(boxes[i]) * torch.as_tensor([w, h, w, h])).int().tolist())
+            hs.append(h)
+            ws.append(w)
+        
+        for i in range(len(boxes)):
+            _box_int = int_boxes[i]
+            _crop_img = [batch['infos'][b][i]['unnorm_img'][:, _box_int[j][1]:_box_int[j][3], _box_int[j][0]:_box_int[j][2]] \
+                         for j in range(len(_box_int))] # (num_boxes, 3, h, w)
+            _crop_img = torch.stack([transform_crop_img(im) for im in _crop_img], dim=0) # (num_boxes, 3, 224, 224)
+            list_crop_imgs.append(_crop_img) 
+            
+        # list_crop_imgs = torch.stack(list_crop_imgs, dim=0) # (num_frame_idx, num_boxes, 3, 224, 224)
+        local_images.append(list_crop_imgs) # (bs, num_frame_idx, num_boxes, 3, 224, 224)
+
+    return local_images
+
+
 def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                     dataloader: DataLoader, criterion: ClipCriterion, optimizer: torch.optim,
                     epoch: int, logger: Logger,
@@ -220,6 +262,8 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
         #     assert len(sentence) == 1
         #     sentence = sentence[0]
 
+        # local_images = get_local_images_in_batch(batch, device) # (bs, num_frame_idx, num_boxes, 3, 224, 224)
+
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
@@ -237,10 +281,16 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                 for f in frame:
                     f.requires_grad_(False)
                 frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+
+                # (new)
+                # local_images_input = [local_images[b][frame_idx] for b in range(len(local_images))]
+                local_images_input = None
+
                 res = model(
                     samples=frame, 
                     tracks=tracks, 
                     captions=sentence,
+                    local_images=local_images_input, # (new) (num_boxes, 3, 224, 224)
                 )
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
@@ -302,13 +352,14 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                              f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                              f"Max Memory={max_memory}MB]",
                         log=metric_log)
-            logger.show(head=f"\tCriterion.tau={criterion.temperature.item()}",) # (new)
+            logger.show(head=f"\t(negligible) Criterion.tau={criterion.temperature.item()}",) # (new)
             logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                          log=metric_log, filename="log.txt", mode="a")
             logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
 
         if multi_checkpoint:
             if i % 100 == 0 and is_main_process():
+                logger.show('Saving checkpoint for iteration {}'.format(i))
                 save_checkpoint(
                     model=model,
                     path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")

@@ -52,7 +52,8 @@ class ClipCriterion:
         self.merge_det_track_layer = merge_det_track_layer
         self.max_text_length = 256
         # (new)
-        self.temperature = None
+        self.temperature = torch.tensor(0.07, requires_grad=True, device=self.device)
+
 
         self.gt_trackinstances_list: None | List[List[TrackInstances]] = None     # (clip_size, B)
         self.loss = {}
@@ -77,9 +78,6 @@ class ClipCriterion:
         batch_size = len(batch["imgs"])
         self.gt_trackinstances_list = []
         
-        # (new)
-        self.temperature = torch.rand(1, requires_grad=True, device=self.device) * 2
-
         for c in range(clip_size):
             gt_trackinstances = TrackInstances.init_tracks(batch, hidden_dim=hidden_dim,
                                                            num_classes=num_classes, device=self.device)
@@ -87,6 +85,8 @@ class ClipCriterion:
                 gt_trackinstances[b].ids = batch["infos"][b][c]["ids"]
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
                 gt_trackinstances[b].boxes = batch["infos"][b][c]["boxes"]
+                # (new) refer task
+                gt_trackinstances[b].ref_exist = batch["infos"][b][c]["ref_exist"]
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
             self.gt_trackinstances_list.append(gt_trackinstances)
 
@@ -278,6 +278,9 @@ class ClipCriterion:
         loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx)
+        
+        # (new) ITM head refer loss
+        loss_refer = self.get_loss_refer(model_outputs, gt_trackinstances, outputs_idx_to_gts_idx)
 
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
@@ -463,6 +466,17 @@ class ClipCriterion:
         )).sum()
         return loss_l1, loss_giou
 
+    def get_loss_refer(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
+        """ Compute the refer loss based on ITM head logits """
+        # outputs["itm_logits"] have dim = (bs, 2)
+        itm_logits = []
+        for b in range(len(outputs["itm_logits"])):
+            item = outputs["itm_logits"][b].repeat(len(gt_trackinstances[b].ref_exist), 1)
+            itm_logits.append(item)
+        itm_logits = torch.cat(itm_logits)
+        target_ref_exist = torch.cat([gt_trackinstances[b].ref_exist for b in range(len(gt_trackinstances))], dim = 0)
+        loss = F.cross_entropy(itm_logits, target_ref_exist, label_smoothing=0.1)
+        return loss
 
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2, tau: float = 1):
@@ -485,11 +499,11 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2, t
         Loss tensor
     """
     prob = inputs.sigmoid() / tau
-    # ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    ce_loss = F.binary_cross_entropy(inputs.sigmoid(), targets, reduction="none")
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    # ce_loss = F.binary_cross_entropy(inputs.sigmoid(), targets, reduction="none")
 
-    if torch.isnan(ce_loss).any():
-        ce_loss[ce_loss != ce_loss] = 0
+    # if torch.isnan(ce_loss).any():
+    #     ce_loss[ce_loss != ce_loss] = 0
 
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
@@ -498,8 +512,8 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2, t
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    if torch.isnan(loss).any():
-        loss[loss != loss] = 0
+    # if torch.isnan(loss).any():
+    #     loss[loss != loss] = 0
 
     return loss.mean(1).sum()   # (n_queries, hidden_dim) -> (n_queries,) -> scalar
 
@@ -555,7 +569,8 @@ def build(config: dict):
         "MOT17PromptCOCO": 1,
     }
     return ClipCriterion(
-        num_classes=dataset_num_classes[config["DATASET"]],
+        num_classes=1, # temporarily replaced by 256 (fixed for max_text_len)
+        # num_classes=dataset_num_classes[config["DATASET"]],
         matcher=build_matcher(config=config),
         n_det_queries=config["NUM_DET_QUERIES"],
         aux_loss=config["AUX_LOSS"],

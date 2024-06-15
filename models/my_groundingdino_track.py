@@ -324,6 +324,9 @@ class GroundingDINO(nn.Module):
         else:
             captions = [t["caption"] for t in targets]
 
+        # (new) get `local_images`
+        self.local_images = kw.get('local_images', None) # cuz samples in (bs, c, w, h) -> local_images in (bs, num_boxes, 3, 224, 224)
+
         ###### Start of Text Encoding
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(device)
         (
@@ -410,7 +413,7 @@ class GroundingDINO(nn.Module):
         # tracks=[] # TODO
         reference_points = self.get_reference_points(tracks=tracks, init_det_ref=input_query_bbox).to(device)
         query_embed = self.get_query_embed(tracks=tracks).to(device) # i.e. target
-        query_mask = self.get_query_mask(tracks=tracks).to(device)
+        query_mask = self.get_query_mask(tracks=tracks).to(device)  
 
 
         ## Feed to Transformer

@@ -296,7 +296,7 @@ class DeformableDecoderLayer(nn.Module):
             reference_points = reference_points[:, :self.n_det_queries, :, :]
             query_mask = query_mask[:, :self.n_det_queries]
 
-        if self.extra_track_attn:
+        if self.extra_track_attn: # not used
             tgt = self.forward_track_attn(tgt=tgt, query_pos=query_pos, query_mask=query_mask)
         tgt = self.forward_self_attn(tgt=tgt, query_pos=query_pos, query_mask=query_mask)
         # Cross Attention
