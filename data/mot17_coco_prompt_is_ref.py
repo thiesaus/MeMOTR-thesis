@@ -13,17 +13,16 @@ import data.transforms as T
 from .mot import MOTDataset
 import json
 
+
 def dd():
     return defaultdict(list)
 def ddd():
     return defaultdict(dd)
 
 
-
-
-class MOT17_COCO(MOTDataset):
+class MOT17Ref(MOTDataset):
     def __init__(self, config: dict, split: str, transform):
-        super(MOT17_COCO, self).__init__(config=config, split=split, transform=transform)
+        super(MOT17Ref, self).__init__(config=config, split=split, transform=transform)
         self.spliter = "/"
         if os.name == "nt":
             self.spliter="\\"
@@ -36,12 +35,15 @@ class MOT17_COCO(MOTDataset):
             self.mot17_data_annotations = json.load(f)
             img_files = self.mot17_data_annotations['images']
             self.img_files = [
-                os.path.join(config["DATA_ROOT"],img_file['file_name'][5:].split('/mot17_train_coco/')[0],"images","train",img_file['file_name'][5:].split('/mot17_train_coco/')[1].split('_')[0], 'img1', img_file['file_name'].split('_')[-1])
-                # "{}/{}".format(
-                # seqs_folder,
-                # img_file['file_name'][5:].replace('mot17_train_coco',os.path.join("images","train")).split('_')[0] + '/img1/' + img_file['file_name'].split('_')[-1])
-
-                for img_file in img_files
+                os.path.join(
+                    config["DATA_ROOT"],
+                    img_file['file_name'][5:].split('/mot17_train_coco/')[0],
+                    "images",
+                    "train",
+                    img_file['file_name'][5:].split('/mot17_train_coco/')[1].split('_')[0], 
+                    'img1', 
+                    img_file['file_name'].split('_')[-1]
+                ) for img_file in img_files
             ] # remove 'data/' from the file name
             self.img_files = [{**img_file, "file_name":_file_name} for img_file,_file_name in zip(img_files,self.img_files)]
 
@@ -54,8 +56,8 @@ class MOT17_COCO(MOTDataset):
             self.unified_random_state = None
 
         assert split == "train", f"Split {split} is NOT supported."
-        self.mot17_seqs_dir = os.path.join(config["DATA_ROOT"], config["DATASET"].split("_")[0], "images", split)
-        self.mot17_gts_dir = os.path.join(config["DATA_ROOT"], config["DATASET"].split("_")[0], "gts", split)
+        self.mot17_seqs_dir = os.path.join(config["DATA_ROOT"], config["DATASET"][:5], "images", split)
+        self.mot17_gts_dir = os.path.join(config["DATA_ROOT"], config["DATASET"][:5], "gts", split)
         self.crowdhuman_seq_dir = os.path.join(config["DATA_ROOT"], "CrowdHuman", "images", "val")
         self.crowdhuman_gts_dir = os.path.join(config["DATA_ROOT"], "CrowdHuman", "gts", "val")
         # Training MOT17, using MOT17 train split and crowdhuman val splits
@@ -76,24 +78,13 @@ class MOT17_COCO(MOTDataset):
         self.sample_vid_tmax = None
 
         self.mot17_gts = defaultdict(ddd)
-        # self.mot17_gts_coco=defaultdict(ddd)
         self.crowdhuman_gts = defaultdict(list)
         self.motsynth_gts = defaultdict(dd)
 
-        # self.mot17_seq_names = [seq for seq in os.listdir(self.mot17_seqs_dir) if "SDP" in seq]
         self.mot17_seq_names = [seq for seq in list(self.mot17_data_annotations["text_key"].keys()) ]
-        # for vid in self.mot17_seq_names:
-        #     mot17_gts_dir = os.path.join(self.mot17_gts_dir, vid,"img1")
-        #     mot17_gt_paths = [os.path.join(mot17_gts_dir, filename) for filename in os.listdir(mot17_gts_dir)]
-        #     for mot17_gt_path in mot17_gt_paths:
-        #         for line in open(mot17_gt_path,"r"):
-        #             _, i, x, y, w, h, v = line.strip("\n").split(" ")
-        #             i, x, y, w, h, v = map(float, (i, x, y, w, h, v))
-        #             i, x, y, w, h = map(int, (i, x, y, w, h))
-        #             t = int(mot17_gt_path.split(self.spliter)[-1].split(".")[0])
-        #             self.mot17_gts[vid][t].append([i, x, y, w, h])
         text_key = self.mot17_data_annotations['text_key']
-        for vid in self.mot17_seq_names:
+
+        for vid in self.mot17_seq_names:    # vid = 'MOT17-xx'
             
             # debugging
             if not vid.startswith('MOT17-04'):
@@ -102,6 +93,7 @@ class MOT17_COCO(MOTDataset):
             for t in text_key[vid]:
                 num=int(t)+1
                 sentences= list(text_key[vid][t].keys())
+
                 for sentence in sentences:
                     
                     if sentence == 'null': # sentence is null when there is lack of either appearance or action caption for the person
@@ -111,7 +103,9 @@ class MOT17_COCO(MOTDataset):
                         i= line["track_id"]
                         x, y, w, h = line["bbox"]
                         i, x, y, w, h = map(int, (i, x, y, w, h))
-                        self.mot17_gts[vid][num][sentence].append([i, x, y, w, h])
+                        self.mot17_gts[vid][num][sentence].append([i, x, y, w, h]) 
+                        # each sentence has a list of [i, x, y, w, h] indicating all the bounding boxes of interest in the frame
+                        
 
         
         # Prepare for MOTSynth
@@ -125,14 +119,6 @@ class MOT17_COCO(MOTDataset):
                         continue
                     x, y, w, h = map(float, xywh)
                     self.motsynth_gts[vid][int(t)].append([int(i), x, y, w, h])
-        # crowdhuman_gt_filenames = os.listdir(self.crowdhuman_gts_dir)
-        # for filename in crowdhuman_gt_filenames:
-        #     crowdhuman_gt_path = os.path.join(self.crowdhuman_gts_dir, filename)
-        #     image_name = filename.split(".")[0]
-        #     for line in open(crowdhuman_gt_path):
-        #         _, i, x, y, w, h = line.strip("\n").split(" ")
-        #         i, x, y, w, h = map(int, (i, x, y, w, h))
-        #         self.crowdhuman_gts[image_name].append([i, x, y, w, h])
 
         self.set_epoch(epoch=0)     # init datasets
      
@@ -140,14 +126,15 @@ class MOT17_COCO(MOTDataset):
 
     def __len__(self):
         assert self.sample_begin_frame_paths is not None, "Please use set_epoch to init DanceTrack Dataset."
-        return len(self.sample_begin_frame_paths )
+        return len(self.sample_begin_frame_paths)
 
     def __getitem__(self, item):
-        # begin_sentence = self.sample_begin_frame_paths[item]["sentence"]
-        # begin_frame_path = self.sample_begin_frame_paths[item]["path"]
-        begin_frame_path = self.sample_begin_frame_paths[item]
+        begin_sentence = self.sample_begin_frame_paths[item]["sentence"]
+        begin_frame_path = self.sample_begin_frame_paths[item]["path"]
+        # begin_frame_path = self.sample_begin_frame_paths[item]
         frame_paths = self.sample_frame_paths(begin_frame_path=begin_frame_path)
-        imgs, infos = self.get_multi_frames(frame_paths=frame_paths,sentence=None)
+        # imgs, infos = self.get_multi_frames(frame_paths=frame_paths,sentence=None)
+        imgs, infos = self.get_multi_frames(frame_paths=frame_paths,sentence=begin_sentence)
 
         if infos[0]["dataset"] == "MOT17":
             imgs, infos = self.transform["MOT17"](imgs, infos)
@@ -156,7 +143,8 @@ class MOT17_COCO(MOTDataset):
 
         return {
             "imgs": imgs,
-            "infos": infos
+            "infos": infos,
+            "sentence": begin_sentence
         }
 
     def set_epoch(self, epoch: int):
@@ -183,16 +171,14 @@ class MOT17_COCO(MOTDataset):
                 t_max = max(map(int,self.mot17_gts[vid].keys()))
                 self.sample_vid_tmax[vid] = t_max
                 for t in range(t_min, t_max - (self.sample_length - 1) + 1):
-                    # for sen in list(self.mot17_gts[vid][t].keys()):
-                    #     sample=defaultdict()
-                    #     sample["path"] = os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
-                    #     sample["sentence"] = sen
-                    #     self.sample_begin_frame_paths.append(
-                    #        sample
-                    #     )
-                    self.sample_begin_frame_paths.append(
-                        os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
-                    )
+                    for sen in list(self.mot17_gts[vid][t].keys()):
+                        sample = defaultdict()
+                        sample["path"] = os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
+                        sample["sentence"] = sen
+                        self.sample_begin_frame_paths.append(sample)
+                    # self.sample_begin_frame_paths.append(
+                    #     os.path.join(self.mot17_seqs_dir, vid, "img1", str(t).zfill(6) + ".jpg")
+                    # )
                 
         if self.use_motsynth:
             multi_random_state = random.getstate()
@@ -242,8 +228,25 @@ class MOT17_COCO(MOTDataset):
             if "MOTSynth" in frame_path:
                 gt = self.motsynth_gts[vid][frame_idx]
             else:
-                # gt = self.mot17_gts[vid][frame_idx][sentence]
-                gt = self.mot17_gts[vid][frame_idx]
+                # gt = self.mot17_gts[vid][frame_idx]
+                gt = self.mot17_gts[vid][frame_idx][sentence]
+                gt_ids = [item[0] for item in gt]
+                
+                # get negative samples for pertinent 'sentence'
+                neg_gt = []
+            
+                sens = self.mot17_gts[vid][frame_idx]
+                del sens[sentence]
+                neg_ids = []
+                for k, v in sens.items():
+                    for i, x, y, w, h in v:
+                        if i not in gt_ids and i not in neg_ids:
+                            neg_gt.append([i, x, y, w, h])
+                            neg_ids.append(i)
+                del sens
+                del neg_ids
+                del gt_ids
+
         else:
             raise RuntimeError(f"Frame path '{frame_path}' has no GTs.")
         img = Image.open(frame_path)
@@ -256,21 +259,36 @@ class MOT17_COCO(MOTDataset):
         info["ids"] = list()
         info["labels"] = list()
         info["areas"] = list()
-        info["sentences"] = list()
+        info["ref_exist"] = list()
         info["dataset"] = "MOT17" if ("MOT17" in frame_path or "MOTSynth" in frame_path) else "CrowdHuman"
 
-        for sen in gt:
-            for i, x, y, w, h in gt[sen]:
-                info["boxes"].append(list(map(float, (x, y, w, h))))
-                info["areas"].append(w * h)
-                info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
-                info["labels"].append(0)
-                info["sentences"].append(sen)
+        for i, x, y, w, h in gt:
+            info["boxes"].append(list(map(float, (x, y, w, h))))
+            info["areas"].append(w * h)
+            info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
+            info["labels"].append(0)
+            info["ref_exist"].append(1)
+
+        for i, x, y, w, h in neg_gt:
+            info["boxes"].append(list(map(float, (x, y, w, h))))
+            info["areas"].append(w * h)
+            info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
+            info["labels"].append(0)
+            info["ref_exist"].append(0)
+
+        # for sen in gt:
+        #     for i, x, y, w, h in gt[sen]:
+        #         info["boxes"].append(list(map(float, (x, y, w, h))))
+        #         info["areas"].append(w * h)
+        #         info["ids"].append(i if "MOT17" in frame_path else i + crowdhuman_ids_offset)
+        #         info["labels"].append(0)
+        #         info["sentences"].append(sen)
 
         info["boxes"] = torch.as_tensor(info["boxes"])
         info["areas"] = torch.as_tensor(info["areas"])
         info["ids"] = torch.as_tensor(info["ids"], dtype=torch.long)
         info["labels"] = torch.as_tensor(info["labels"], dtype=torch.long)
+        info["ref_exist"] = torch.as_tensor(info["ref_exist"])
         
         # xywh to xyxy
         if len(info["boxes"]) > 0:
@@ -279,12 +297,13 @@ class MOT17_COCO(MOTDataset):
             info["boxes"] = torch.zeros((0, 4))
             info["ids"] = torch.zeros((0, ), dtype=torch.long)
             info["labels"] = torch.zeros((0, ), dtype=torch.long)
+            info["ref_exist"] = torch.zeros((0, ), dtype=torch.long)
 
         info['frame_path'] = frame_path # for debugging
 
         return img, info
 
-    def get_multi_frames(self, frame_paths: list[str],sentence:str=None):
+    def get_multi_frames(self, frame_paths: list[str], sentence: str = None):
         return zip(*[self.get_single_frame(frame_path=path,sentence=sentence) for path in frame_paths])
 
 
@@ -338,7 +357,7 @@ def transforms_for_train(coco_size: bool = False, overflow_bbox: bool = False, r
 
 def build(config: dict, split: str):
     if split == "train":
-        return MOT17_COCO(
+        return MOT17Ref(
             config=config,
             split=split,
             transform=transforms_for_train(
