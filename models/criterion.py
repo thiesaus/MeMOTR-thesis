@@ -373,7 +373,7 @@ class ClipCriterion:
                         aux_idx_to_gts_idx[b][1] = torch.cat((aux_idx_to_gts_idx[b][1], tracked_idx_to_gts_idx[b][1]))
 
                 model_outputs["aux_outputs"][i]["one_hot"] = get_one_hot_from_indices(
-                    shape=model_outputs["aux_outputs"].size(), 
+                    shape=model_outputs["aux_outputs"][i].size(), 
                     targets=gt_trackinstances, 
                     indices=aux_matcher_res, 
                     label_map_list=label_map_list)
