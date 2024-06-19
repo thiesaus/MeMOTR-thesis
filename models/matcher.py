@@ -55,7 +55,8 @@ class HungarianMatcher(nn.Module):
         self.cost_giou = cost_giou
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
-    def forward(self, outputs, targets, use_focal=True):
+    @torch.no_grad()
+    def forward(self, outputs, targets, label_map_list, use_focal=True):
         """ Performs the matching
 
         Params:
@@ -76,60 +77,67 @@ class HungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
-        with torch.no_grad():
-            bs, num_queries = outputs["pred_logits"].shape[:2]
+        bs, num_queries = outputs["pred_logits"].shape[:2] # (bs, num_queries, max_text_len)
 
-            # We flatten to compute the cost matrices in a batch
-            if use_focal:
-                out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
-            else:
-                out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
-            out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        # We flatten to compute the cost matrices in a batch
+        if use_focal:
+            out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
+        else:
+            out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
-            # Also concat the target labels and boxes
-            if isinstance(targets[0], Instances):
-                tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
-                tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
-            elif isinstance(targets[0], TrackInstances):
-                tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
-                tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
-            else:
-                tgt_ids = torch.cat([v["labels"] for v in targets])
-                tgt_bbox = torch.cat([v["boxes"] for v in targets])
+        # Also concat the target labels and boxes
+        if isinstance(targets[0], Instances):
+            tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
+            tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
+        elif isinstance(targets[0], TrackInstances):
+            tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
+            tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
+        else:
+            tgt_ids = torch.cat([v["labels"] for v in targets])
+            tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-            # Compute the classification cost.
-            if use_focal:
-                alpha = 0.25
-                gamma = 2.0
-                neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
-                pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-                cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
-            else:
-                # Compute the classification cost. Contrary to the loss, we don't use the NLL,
-                # but approximate it in 1 - proba[target class].
-                # The 1 is a constant that doesn't change the matching, it can be ommitted.
-                cost_class = -out_prob[:, tgt_ids]
+        # Compute the L1 cost between boxes
+        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-            # Compute the L1 cost between boxes
-            cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+        # Compute the classification cost.
+        if use_focal:
+            alpha = 0.25
+            gamma = 2.0
+            neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+            pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+            # cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+            label_map = torch.cat([label_map_list[b].to(pos_cost_class.device) for b in range(bs)])[tgt_ids.cpu()] 
+            cost_class = (pos_cost_class @ label_map.T - neg_cost_class @ label_map.T) / label_map.sum(dim=-1)
+            # pos_cost_class & neg_cost_class: [bs * num_queries, hidden_dim]
+            # label_map_list: [num_labels in bs batch, hidden_dim]
+        else:
+            # Compute the classification cost. Contrary to the loss, we don't use the NLL,
+            # but approximate it in 1 - proba[target class].
+            # The 1 is a constant that doesn't change the matching, it can be ommitted.
+            cost_class = -out_prob[:, tgt_ids]
 
-            # Compute the giou cost betwen boxes
-            cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
-                                             box_cxcywh_to_xyxy(tgt_bbox))
+        # Compute the giou cost betwen boxes
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
+                                         box_cxcywh_to_xyxy(tgt_bbox))
+        
+        # cost_class: [bs * num_queries, num labels in bs batch]
+        # cost_bbox:  [bs * num_queries, num boxes  in bs batch] (num_boxes == num_labels)
+        # cost_giou:  [bs * num_queries, num boxes  in bs batch]
 
-            # Final cost matrix
-            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-            C = C.view(bs, num_queries, -1).cpu()
+        # Final cost matrix
+        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+        C = C.view(bs, num_queries, -1).cpu()
 
-            if isinstance(targets[0], Instances):
-                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
-            elif isinstance(targets[0], TrackInstances):
-                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
-            else:
-                sizes = [len(v["boxes"]) for v in targets]
+        if isinstance(targets[0], Instances):
+            sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
+        elif isinstance(targets[0], TrackInstances):
+            sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
+        else:
+            sizes = [len(v["boxes"]) for v in targets]
 
-            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
 def build(config: dict):

@@ -12,6 +12,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from structures.track_instances import TrackInstances
+from structures.instances import Instances
+
 
 def _get_clones(module, N, layer_share=False):
     # import ipdb; ipdb.set_trace()
@@ -243,15 +246,15 @@ class ContrastiveEmbed(nn.Module):
         """_summary_
 
         Args:
-            x (_type_): _description_
-            text_dict (_type_): _description_
+            x (torch.Tensor): Tensor of dim [bs, n, d_model]
+            text_dict (dict): 
             {
-                'encoded_text': encoded_text, # bs, 195, d_model
-                'text_token_mask': text_token_mask, # bs, 195
+                'encoded_text': encoded_text,       # [bs, 195, d_model]
+                'text_token_mask': text_token_mask, # [bs, 195]
                         # True for used tokens. False for padding tokens
             }
         Returns:
-            _type_: _description_
+            torch.Tensor: Tensor of dim [bs, n, max_text_len]
         """
         assert isinstance(text_dict, dict)
 
@@ -266,3 +269,83 @@ class ContrastiveEmbed(nn.Module):
         new_res[..., : res.shape[-1]] = res
 
         return new_res
+
+
+def create_positive_map(tokenized, tokens_positive, cat_list, caption):
+    """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
+    positive_map = torch.zeros((len(tokens_positive), 256), dtype=torch.float)
+
+    for j,label in enumerate(tokens_positive):
+
+        start_ind = caption.find(cat_list[label])
+        end_ind = start_ind + len(cat_list[label]) - 1
+        beg_pos = tokenized.char_to_token(start_ind)
+        try:
+            end_pos = tokenized.char_to_token(end_ind)
+        except:
+            end_pos = None
+        if end_pos is None:
+            try:
+                end_pos = tokenized.char_to_token(end_ind - 1)
+                if end_pos is None:
+                    end_pos = tokenized.char_to_token(end_ind - 2)
+            except:
+                end_pos = None
+        # except Exception as e:
+        #     print("beg:", beg, "end:", end)
+        #     print("token_positive:", tokens_positive)
+        #     # print("beg_pos:", beg_pos, "end_pos:", end_pos)
+        #     raise e
+        # if beg_pos is None:
+        #     try:
+        #         beg_pos = tokenized.char_to_token(beg + 1)
+        #         if beg_pos is None:
+        #             beg_pos = tokenized.char_to_token(beg + 2)
+        #     except:
+        #         beg_pos = None
+        # if end_pos is None:
+        #     try:
+        #         end_pos = tokenized.char_to_token(end - 2)
+        #         if end_pos is None:
+        #             end_pos = tokenized.char_to_token(end - 3)
+        #     except:
+        #         end_pos = None
+        if beg_pos is None or end_pos is None:
+            continue
+        if beg_pos < 0 or end_pos < 0:
+            continue
+        if beg_pos > end_pos:
+            continue
+        # assert beg_pos is not None and end_pos is not None
+        positive_map[j,beg_pos: end_pos + 1].fill_(1)
+    return positive_map 
+
+
+def get_one_hot_from_indices(shape, targets, indices, label_map_list):
+    """
+    Generate one hot tensor from indices.
+
+    Args:
+        shape (torch.Size): _description_
+        targets (TrackInstances): _description_
+        indices (List): _description_
+        label_map_list (List): _description_
+
+    Returns:
+        torch.Tensor: with the same shape as input shape
+    """
+    one_hot = torch.zeros(shape, dtype=torch.long)
+
+    if isinstance(targets[0], Instances):
+        tgt_ids = [gt_per_img.labels for gt_per_img in targets]
+    elif isinstance(targets[0], TrackInstances):
+        tgt_ids = [gt_per_img.labels for gt_per_img in targets]
+    else:
+        tgt_ids = [v["labels"] for v in targets]
+    
+    # len(tgt_ids) == bs
+    for i in range(len(indices)):
+        tgt_ids[i] = tgt_ids[i][indices[i][1]].cpu()
+        one_hot[i, indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
+
+    return one_hot

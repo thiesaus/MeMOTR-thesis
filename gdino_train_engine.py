@@ -10,7 +10,8 @@ from typing import List, Tuple, Dict
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from models import build_model, build_gdino_model
-from data import build_dataset, build_sampler, build_dataloader, build_dataloader_w_sen
+from data import (build_dataset, build_sampler, build_dataloader, 
+                  build_dataloader_w_sen, build_dataloader_w_cat_cap)
 from utils.utils import labels_to_one_hot, is_distributed, distributed_rank, set_seed, is_main_process, \
     distributed_world_size
 from utils.nested_tensor import tensor_list_to_nested_tensor
@@ -52,21 +53,13 @@ def train(config: dict):
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
     # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
     #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
-    dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
-                                              batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+    # dataloader_train = build_dataloader_w_sen(dataset=dataset_train, sampler=sampler_train,
+    #                                           batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
-
-
-    # if config['GET_DATA_SUBSET'] is True and config['SUBSET_LENGTH'] > 0:
-    #     print("Running on subset of first {} data samples.".format(config['SUBSET_LENGTH']))
-    #     from torch.utils.data.sampler import SubsetRandomSampler
-    #     split = config['SUBSET_LENGTH']
-    #     indices = list(range(len(dataset_train)))
-    #     train_indices = indices[:split]
-    #     sampler_train = SubsetRandomSampler(train_indices)
-    #     dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-    #                                         batch_size=config["BATCH_SIZE"],num_workers=config["NUM_WORKERS"])
-
+    dataloader_train = build_dataloader_w_cat_cap(
+        dataset=dataset_train, sampler=sampler_train,
+        batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"]
+    )
 
     # Criterion
     criterion = build_criterion(config=config)
@@ -119,12 +112,6 @@ def train(config: dict):
         if is_distributed():
             sampler_train.set_epoch(epoch)
         dataset_train.set_epoch(epoch)
-
-        # sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-        #                                     batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
-        # dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-        #                                           batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
             optimizer.param_groups[0]["lr"] = 0.0
@@ -256,14 +243,8 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
     epoch_start_timestamp = time.time()
 
     for i, batch in enumerate(dataloader):
-        # load sentence
-        sentence = batch['sentence']
-        # if type(sentence) == list: 
-        #     assert len(sentence) == 1
-        #     sentence = sentence[0]
-
-        # local_images = get_local_images_in_batch(batch, device) # (bs, num_frame_idx, num_boxes, 3, 224, 224)
-
+        category_caption = batch['cat_caption']
+        cat_list = batch['cat_list']
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
@@ -289,13 +270,15 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                 res = model(
                     samples=frame, 
                     tracks=tracks, 
-                    captions=sentence,
+                    captions=category_caption,
                     local_images=local_images_input, # (new) (num_boxes, 3, 224, 224)
                 )
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,
-                    frame_idx=frame_idx
+                    frame_idx=frame_idx,
+                    cat_list=cat_list,
+                    caption=category_caption,
                 )
                 if frame_idx < len(batch["imgs"][0]) - 1:
                     tracks = get_model(model).postprocess_single_frame(

@@ -100,6 +100,7 @@ class GroundingDINO(nn.Module):
         self.nheads = nheads
         self.max_text_len = 256
         self.sub_sentence_present = sub_sentence_present
+        # self.num_categories = num_categories
 
         # setting query dim
         self.query_dim = query_dim
@@ -307,7 +308,8 @@ class GroundingDINO(nn.Module):
     
     # End of new for tracking
 
-    def forward(self, samples: NestedTensor, targets: List = None, tracks: list[TrackInstances] = None, **kw):
+    def forward(self, samples: NestedTensor, targets: List = None, 
+                tracks: list[TrackInstances] = None, **kw):
         """The forward expects a NestedTensor, which consists of:
            - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
            - samples.masks: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -322,9 +324,14 @@ class GroundingDINO(nn.Module):
            - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                             dictionnaries containing the two above keys for each decoder layer.
         """
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        if not hasattr(self, 'features') or not hasattr(self, 'poss'):
+            self.set_image_tensor(samples)
+            
         device = samples.tensors.device
 
-        # TODO: what is `targets`
+        # get prompt
         if targets is None:
             captions = kw["captions"]
         else:
@@ -387,10 +394,6 @@ class GroundingDINO(nn.Module):
 
         #### Start of image encoding
         # import ipdb; ipdb.set_trace()
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-        if not hasattr(self, 'features') or not hasattr(self, 'poss'):
-            self.set_image_tensor(samples)
 
         srcs = []
         masks = []
@@ -467,7 +470,8 @@ class GroundingDINO(nn.Module):
                     torch.save(layer[bs].cpu(), f"./outputs/visualize_tmp/gdino/cls_{lid}_{bs}.tensor")
 
         # (new) ITM head
-        itm_logits = self.itm_head(bert_output["last_hidden_state"][:, 0, :])  # (bs, 2)
+        # itm_logits = self.itm_head(bert_output["last_hidden_state"][:, 0, :])  # (bs, 2)
+        itm_logits = None
 
         out = {
             "outputs": hs[-1],                                      # (new) (bs, Nd+Nq, C)

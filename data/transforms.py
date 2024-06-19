@@ -170,6 +170,8 @@ class MultiRandomCrop:
                 # info["sentences"] = [info["sentences"][i] for i, keep in enumerate(keep_idxs) if keep]
                 if "ref_exist" in info:
                     info["ref_exist"] = info["ref_exist"][keep_idxs]
+                if "positive_maps" in info:
+                    info["positive_maps"] = info["positive_maps"][keep_idxs]
 
             return cropped_img, info
 
@@ -212,6 +214,8 @@ class MultiRandomShift:
                 # (new)
                 if "ref_exist" in info:
                     info["ref_exist"] = info["ref_exist"][keep_idxs]
+                if "positive_maps" in info:
+                    info["positive_maps"] = info["positive_maps"][keep_idxs]
                     
             return cropped_image, info
 

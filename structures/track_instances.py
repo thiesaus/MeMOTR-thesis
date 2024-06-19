@@ -37,7 +37,11 @@ class TrackInstances:
         self.last_appear_boxes = torch.zeros((0, 4))
 
         # (new) refer task
-        self.ref_exist = torch.zeros((0,), dtype=torch.long)
+        # self.ref_exist = torch.zeros((0,), dtype=torch.long)
+        
+        # (new) add category pos map
+        max_text_len = 256
+        self.pos_map = torch.zeros((0, max_text_len), dtype=torch.float)
 
     def to(self, device):
         res = TrackInstances(frame_height=self.frame_height, frame_width=self.frame_width,

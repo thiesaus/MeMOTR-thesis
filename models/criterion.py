@@ -22,6 +22,8 @@ from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
 
+from models.gdino_utils import create_positive_map, get_one_hot_from_indices
+
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
@@ -85,9 +87,18 @@ class ClipCriterion:
                 gt_trackinstances[b].ids = batch["infos"][b][c]["ids"]
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
                 gt_trackinstances[b].boxes = batch["infos"][b][c]["boxes"]
-                # (new) refer task
-                gt_trackinstances[b].ref_exist = batch["infos"][b][c]["ref_exist"]
+                # # (new) refer task
+                # try:
+                #     gt_trackinstances[b].ref_exist = batch["infos"][b][c]["ref_exist"]
+                # except:
+                #     pass
+
+                # (new) add category
+                try: gt_trackinstances[b].pos_map = batch["infos"][b][c]["positive_maps"]
+                except: pass
+
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
+
             self.gt_trackinstances_list.append(gt_trackinstances)
 
         self.n_gts = []
@@ -146,7 +157,8 @@ class ClipCriterion:
                     break
         return loss, log
 
-    def process_single_frame(self, model_outputs: dict, tracked_instances: List[TrackInstances], frame_idx: int):
+    def process_single_frame(self, model_outputs: dict, tracked_instances: List[TrackInstances], 
+                             frame_idx: int, cat_list: list = None, caption: str = None):
         """
         Process this criterion for a single frame.
 
@@ -167,7 +179,7 @@ class ClipCriterion:
 
         # 3. Get the detection results in current frame.
         detection_res = {
-            "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
+            "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, num_categories) # (old) (B, Nd, n_classes)
             "pred_boxes": model_outputs["pred_boxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
         }
 
@@ -181,15 +193,17 @@ class ClipCriterion:
         num_disappeared_tracked_gts = 0
         for b in range(len(tracked_instances)):
             gt_idx = []
-            if len(tracked_instances[b]) > 0:
-                for gt_id in tracked_instances[b].ids.tolist():
-                    if gt_id in gt_ids_to_idx[b]:
-                        gt_idx.append(gt_ids_to_idx[b][gt_id])
-                    else:
-                        gt_idx.append(-1)
-                        num_disappeared_tracked_gts += 1
+            if len(tracked_instances[b]) == 0:
+                continue
+            for gt_id in tracked_instances[b].ids.tolist():
+                if gt_id in gt_ids_to_idx[b]:
+                    gt_idx.append(gt_ids_to_idx[b][gt_id])
+                else:
+                    gt_idx.append(-1)
+                    num_disappeared_tracked_gts += 1
             tracked_instances[b].matched_idx = torch.as_tensor(data=gt_idx,
-                                                               dtype=tracked_instances[b].matched_idx.dtype)
+                                                               dtype=tracked_instances[b].matched_idx.dtype,
+                                                               device="cpu")
         # 4.+ Filter the gts that not in the tracked instances:
         gt_full_idx = []
         untracked_gt_trackinstances = []
@@ -204,9 +218,46 @@ class ClipCriterion:
                     idx_bool[i.item()] = False
             untracked_gt_trackinstances.append(gt_trackinstances[b][idx_bool])
 
+        """ pls work """
+        token = model_outputs["token"]
+        label_map_list = []
+        for j in range(len(cat_list)): # bs
+            label_map = []
+            for i in range(len(cat_list[j])):
+                label_id = torch.tensor([i])
+                per_label = create_positive_map(token[j], label_id, cat_list[j], caption[j])
+                label_map.append(per_label)
+            label_map = torch.stack(label_map,dim=0).squeeze(1)
+            label_map_list.append(label_map)
+        # for j in range(len(cat_list)): # bs
+        #     for_match = {
+        #         "pred_logits" : model_outputs['pred_logits'][j].unsqueeze(0),
+        #         "pred_boxes" : model_outputs['pred_boxes'][j].unsqueeze(0)
+        #     }
+        #     inds = self.matcher(for_match, [targets[j]], label_map_list[j])
+        #     indices.extend(inds)
+        #     # indices : A list of size batch_size, containing tuples of (index_i, index_j) where:
+        #     # - index_i is the indices of the selected predictions (in order)
+        #     # - index_j is the indices of the corresponding selected targets (in order)
+
+        # # import pdb; pdb.set_trace()
+        # tgt_ids = [v["labels"].cpu() for v in targets]
+        # # len(tgt_ids) == bs
+        # for i in range(len(indices)):
+        #     tgt_ids[i]=tgt_ids[i][indices[i][1]]
+        #     one_hot[i,indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
+
         # 5. Use Hungarian algorithm to matching.
-        matcher_res = self.matcher(outputs=detection_res, targets=untracked_gt_trackinstances, use_focal=True)
-        matcher_res = [list(mr) for mr in matcher_res]
+        matcher_res = self.matcher(outputs=detection_res, targets=untracked_gt_trackinstances, use_focal=True, label_map_list=label_map_list)
+        matcher_res = [list(mr) for mr in matcher_res] 
+        # len(matcher_res) = batch_size
+        # dim 0: matched detection indices.
+        # dim 1: matched corresponding ground-truth indices.
+
+        model_outputs["one_hot"] = get_one_hot_from_indices(shape=model_outputs["pred_logits"].size(), 
+                                                            targets=untracked_gt_trackinstances, 
+                                                            indices=matcher_res, 
+                                                            label_map_list=label_map_list)
 
         def matcher_res_for_gt_idx(res):
             for bi in range(len(res)):
@@ -230,6 +281,7 @@ class ClipCriterion:
             gt_idx = torch.as_tensor([gt_ids_to_idx[b][gt_id.item()] for gt_id in gt_ids], dtype=torch.long)
             trackinstances.ids = gt_ids
             trackinstances.matched_idx = gt_idx
+            """
             # # trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
             # if self.use_dab:
             #     trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
@@ -241,6 +293,7 @@ class ClipCriterion:
             #         ),
             #         dim=-1
             #     )
+            """
             # (new)
             trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
 
@@ -259,9 +312,7 @@ class ClipCriterion:
             tracked_outputs_idx = torch.arange(start=self.n_det_queries,
                                                end=self.n_det_queries + len(tracked_instances[b]))
             tracked_gts_idx = tracked_instances[b].matched_idx
-            tracked_idx_to_gts_idx.append([
-                tracked_outputs_idx, tracked_gts_idx
-            ])
+            tracked_idx_to_gts_idx.append([tracked_outputs_idx.cpu(), tracked_gts_idx.cpu()])
             assert len(tracked_outputs_idx) == len(tracked_gts_idx)
         outputs_idx_to_gts_idx = copy.deepcopy(matcher_res)
         for b in range(len(tracked_instances)):
@@ -280,7 +331,7 @@ class ClipCriterion:
                                                idx_to_gts_idx=outputs_idx_to_gts_idx)
         
         # (new) ITM head refer loss
-        loss_refer = self.get_loss_refer(model_outputs, gt_trackinstances, outputs_idx_to_gts_idx)
+        # loss_refer = self.get_loss_refer(model_outputs, gt_trackinstances, outputs_idx_to_gts_idx)
 
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
@@ -304,11 +355,11 @@ class ClipCriterion:
                 # Same to 5.
                 if i < self.merge_det_track_layer:
                     aux_matcher_res = self.matcher(outputs=aux_det_res, targets=gt_trackinstances,
-                                                   use_focal=True)
+                                                   use_focal=True, label_map_list=label_map_list)
                     aux_matcher_res = [list(mr) for mr in aux_matcher_res]
                 else:
                     aux_matcher_res = self.matcher(outputs=aux_det_res, targets=untracked_gt_trackinstances,
-                                                   use_focal=True)
+                                                   use_focal=True, label_map_list=label_map_list)
                     aux_matcher_res = [list(mr) for mr in aux_matcher_res]
                     aux_matcher_res = matcher_res_for_gt_idx(aux_matcher_res)
                 # Same to some part in 7.
@@ -320,6 +371,12 @@ class ClipCriterion:
                     else:
                         aux_idx_to_gts_idx[b][0] = torch.cat((aux_idx_to_gts_idx[b][0], tracked_idx_to_gts_idx[b][0]))
                         aux_idx_to_gts_idx[b][1] = torch.cat((aux_idx_to_gts_idx[b][1], tracked_idx_to_gts_idx[b][1]))
+
+                model_outputs["aux_outputs"][i]["one_hot"] = get_one_hot_from_indices(
+                    shape=model_outputs["aux_outputs"].size(), 
+                    targets=gt_trackinstances, 
+                    indices=aux_matcher_res, 
+                    label_map_list=label_map_list)
 
                 # Compute the aux loss.
                 aux_loss_label = self.get_loss_label(outputs=model_outputs["aux_outputs"][i],
@@ -414,6 +471,8 @@ class ClipCriterion:
         pred_logits = [
             preds[~mask] for preds, mask in zip(outputs["pred_logits"], outputs["query_mask"])
         ]
+
+        # (MeMOTR)
         # gt_labels = [
         #     torch.full((pred_logits[b].shape[:1]),
         #                self.num_classes,
@@ -422,21 +481,21 @@ class ClipCriterion:
         # ]
         # for b in range(len(pred_logits)):
         #     gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
-        #         = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-        pred_logits = torch.cat(pred_logits)
+        #         = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]] # (>=0 means active tracks)
+        # pred_logits = torch.cat(pred_logits)
         # gt_labels = torch.cat(gt_labels)
-        # gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
-        #     .to(pred_logits.dtype).to(pred_logits.device)
-
-        targets = torch.zeros_like(pred_logits)
+        # gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1].to(pred_logits.dtype).to(pred_logits.device)
 
         # loss = sigmoid_focal_loss(inputs=pred_logits,
-        #                           targets=targets, # (old) gt_labels_one_hot
+        #                           targets=gt_labels_one_hot,
         #                           alpha=0.25,
-        #                           gamma=2,
-        #                           tau=self.temperature)
+        #                           gamma=2)
 
-        # loss = my_loss(inputs=pred_logits, targets=targets, tau=self.temperature)
+
+
+        # (GDINO)
+        gt_cat_pos_map = [gt_trackinstances[b].pos_map for b in range(len(gt_trackinstances))]
+        pred_logits = torch.cat(pred_logits) 
         loss = token_sigmoid_binary_focal_loss(outputs=outputs, indices=idx_to_gts_idx, alpha=0.25, gamma=2)
 
         return loss
@@ -526,8 +585,8 @@ def my_loss(inputs, targets, tau):
 def token_sigmoid_binary_focal_loss(outputs, indices, alpha, gamma):
     # TODO: need review
     pred_logits = outputs['pred_logits']
-    # new_targets = outputs['one_hot'].to(pred_logits.device).float()
-    new_targets = torch.zeros_like(pred_logits, device=pred_logits.device, dtype=torch.float) + 1e-2
+    new_targets = outputs['one_hot'].to(pred_logits.device).float() # (must be verified to be the same shape as pred_logits)
+    # new_targets = torch.zeros_like(pred_logits, device=pred_logits.device, dtype=torch.float) + 1e-2
     text_mask   = outputs['text_mask']
 
     assert (new_targets.dim() == 3)
