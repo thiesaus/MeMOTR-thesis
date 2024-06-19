@@ -104,7 +104,6 @@ class ClipCriterion:
         self.n_gts = []
         if self.aux_loss:
             self.loss = {
-                "tau": self.temperature, # (new)
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
@@ -114,7 +113,6 @@ class ClipCriterion:
             }
         else:
             self.loss = {
-                "tau": self.temperature, # (new)
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
