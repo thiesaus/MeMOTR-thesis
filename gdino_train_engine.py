@@ -335,7 +335,6 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                              f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                              f"Max Memory={max_memory}MB]",
                         log=metric_log)
-            logger.show(head=f"\t(negligible) Criterion.tau={criterion.temperature.item()}",) # (new)
             logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                          log=metric_log, filename="log.txt", mode="a")
             logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
