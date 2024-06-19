@@ -17,7 +17,6 @@ from .utils import get_clones, pos_to_pos_embed
 
 from .backbone import build as build_backbone_with_pe
 from .deformable_transformer import build as build_deformable_transformer
-from .query_initiator import build as build_query_initiator
 
 from utils.nested_tensor import NestedTensor
 from structures.track_instances import TrackInstances
@@ -27,6 +26,7 @@ from torch.utils.checkpoint import checkpoint
 
 # text encoder
 from .text_encoder import build as build_text_encoder
+import clip
 
 # vi-lang components
 from .vi_lang_modules import VisionLanguageFusionModule, PositionEmbeddingSine1D, FeatureResizer
@@ -37,7 +37,7 @@ import copy
 
 class MeMOTR(nn.Module):
     def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
-                 query_updater: nn.Module, query_initiator: nn.Module, text_encoder,
+                 query_updater: nn.Module, model_name, text_encoder,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
                  aux_loss: bool = True, with_box_refine: bool = True,
@@ -63,25 +63,25 @@ class MeMOTR(nn.Module):
         # # referring branch
         # self.refer_embed = nn.Linear(hidden_dim, 1)
 
-        # self.tokenizer, self.text_encoder = text_encoder
+        self.model_name = model_name
+        if model_name == 'roberta-base':
+            self.tokenizer, self.text_encoder = text_encoder
+            self.txt_proj = FeatureResizer(
+                input_feat_size=self.text_encoder.config.hidden_size,
+                output_feat_size=hidden_dim,
+                dropout=True,
+            )
+            self.fusion_module = VisionLanguageFusionModule(d_model=hidden_dim, nhead=8)
+            self.text_pos = PositionEmbeddingSine1D(hidden_dim, normalize=True)
 
-        # self.txt_proj = FeatureResizer(
-        #     input_feat_size=self.text_encoder.config.hidden_size,
-        #     output_feat_size=hidden_dim,
-        #     dropout=True,
-        # )
-
-        # self.fusion_module = VisionLanguageFusionModule(d_model=hidden_dim, nhead=8)
-        # self.text_pos = PositionEmbeddingSine1D(hidden_dim, normalize=True)
+        elif model_name == 'RN50':
+            self.clip = text_encoder
 
 
         # Net:
         self.backbone = backbone
         self.transformer = transformer
         self.query_updater = query_updater
-
-        # (new)
-        self.query_initiator = query_initiator
 
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
@@ -157,13 +157,19 @@ class MeMOTR(nn.Module):
             features, pos = self.backbone(frame)
 
         # extract linguistic features
-        src, mask = features[-1].decompose()
-        assert mask is not None
-        text_word_features, text_word_mask, text_sentence_features = self.forward_text(sentences, src.device)
-        # text_word_features = text_word_features.flatten(0, 1).unsqueeze(0)
-        # text_word_mask = text_word_mask.flatten(0, 1).unsqueeze(0)
-        text_pos = self.text_pos(NestedTensor(text_word_features, text_word_mask)).permute(2, 0, 1)
-        text_word_features = text_word_features.permute(1, 0, 2)
+        if self.model_name == 'roberta-base':
+            src, mask = features[-1].decompose()
+            assert mask is not None
+            text_word_features, text_word_mask, text_sentence_features = self.forward_text(sentences, src.device)
+            # text_word_features = text_word_features.flatten(0, 1).unsqueeze(0)
+            # text_word_mask = text_word_mask.flatten(0, 1).unsqueeze(0)
+            text_pos = self.text_pos(NestedTensor(text_word_features, text_word_mask)).permute(2, 0, 1)
+            text_word_features = text_word_features.permute(1, 0, 2)
+        elif self.model_name == 'RN50':
+            text_word_features = self.clip.encode_text(clip.tokenize(sentences).to(features[-1].tensors.device))
+            text_word_features = text_word_features.unsqueeze(0)
+            # change from FP16 to FP32
+            text_word_features = text_word_features.float()
 
         srcs, masks = [], []
 
@@ -289,7 +295,7 @@ class MeMOTR(nn.Module):
         
         res = {
             "pred_logits": output_classes[-1],
-            "pred_bboxes": output_bboxes[-1],
+            "pred_boxes": output_bboxes[-1],
             "last_ref_pts": inverse_sigmoid(inter_references[-2, :, :, :]) if self.use_dab       # (B, Nd+Nq, 4)
             else inverse_sigmoid(inter_references[-2, :, :, :]),                                 # (B, Nd+Nq, 2)
             "query_mask": query_mask,                   # (B, Nd+Nq)
@@ -312,7 +318,7 @@ class MeMOTR(nn.Module):
         as a dict having both a Tensor and a list.
         """
         return [
-            {"pred_logits": a, "pred_bboxes": b, "query_mask": query_mask, "queries": c}
+            {"pred_logits": a, "pred_boxes": b, "query_mask": query_mask, "queries": c}
             for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], queries[1:])
         ]
 
@@ -372,7 +378,6 @@ class MeMOTR(nn.Module):
         else:
             det_query_embed = self.det_query_embed.repeat(len(tracks), 1, 1)                    # (B, Nd, 2C)
         track_query_embed = self.get_track_query_embed(tracks).to(det_query_embed.device)       # (B, Nq, 2C)
-        track_query_embed = self.query_initiator(track_query_embed)
         return torch.cat((det_query_embed, track_query_embed), dim=1)
 
     def get_query_mask(self, tracks: list[TrackInstances]):
@@ -406,7 +411,7 @@ def build(config: dict):
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
         "MOT17_COCO": 1,
-        "MOT17PromptCOCO": 1
+        "MOT17PromptCOCO": 1,
     }
     assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
     num_classes = dataset_num_classes[config["DATASET"]]
@@ -414,14 +419,13 @@ def build(config: dict):
     backbone_with_pe = build_backbone_with_pe(config=config)
     deformable_transformer = build_deformable_transformer(config=config)
     query_updater = build_query_updater(config=config)
-    text_encoder = build_text_encoder(config=config)
-    query_initiator = build_query_initiator(config=config)
-
+    model_name, text_encoder = build_text_encoder(config=config)
+    
     return MeMOTR(
         backbone=backbone_with_pe,
         transformer=deformable_transformer,
         query_updater=query_updater,
-        query_initiator=query_initiator,
+        model_name=model_name,
         text_encoder=text_encoder,
         num_classes=num_classes,
         n_det_queries=config["NUM_DET_QUERIES"],
