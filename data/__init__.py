@@ -20,9 +20,11 @@ from .dancetrack import build as build_dancetrack
 from .mot17 import build as build_mot17
 from .mot17_coco import build as build_mot17_coco
 from .mot17_coco_prompt import build as build_mot17_prompt_coco
+from .mot17_coco_prompt_is_ref import build as build_mot17_coco_ref
+from .mot17_coco_prompt_openvocab import build as build_mot17_coco_ov
 from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
-from .utils import collate_fn, collate_fn_w_sen
+from .utils import collate_fn, collate_fn_w_sen, collate_fn_w_cat_cap
 from utils.utils import is_distributed
 
 
@@ -39,6 +41,10 @@ def build_dataset(config: dict, split: str) -> MOTDataset:
         return build_mot17_coco(config=config, split=split)
     elif config["DATASET"] == "MOT17PromptCOCO":
         return build_mot17_prompt_coco(config=config, split=split)
+    elif config["DATASET"] == "MOT17Ref":
+        return build_mot17_coco_ref(config=config, split=split)
+    elif config["DATASET"] == "MOT17OV":
+        return build_mot17_coco_ov(config=config, split=split)
     elif config["DATASET"] == "BDD100K":
         return build_bbd100k(config=config, split=split)
     else:
@@ -70,5 +76,15 @@ def build_dataloader_w_sen(dataset: MOTDataset, sampler, batch_size: int, num_wo
         sampler=sampler,
         num_workers=num_workers,
         collate_fn=collate_fn_w_sen,
+        pin_memory=True
+    )
+
+def build_dataloader_w_cat_cap(dataset: MOTDataset, sampler, batch_size: int, num_workers: int):
+    return DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn_w_cat_cap,
         pin_memory=True
     )
