@@ -29,6 +29,8 @@ from models.utils import load_pretrained_model
 # Visualization
 from utils.tools import visualize_a_batch, visualize_a_batch_w_sen
 
+import wandb
+
 def train(config: dict):
     train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True)
     train_logger.show(head="Configs:", log=config)
@@ -64,6 +66,18 @@ def train(config: dict):
     # Criterion
     criterion = build_criterion(config=config)
     criterion.set_device(torch.device("cuda", distributed_rank()))
+
+    wandb.init(
+        # Set the project where this run will be logged
+        project="thien", 
+        # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+        # name=f"baseline_w_gdino_", 
+        # # Track hyperparameters and run metadata
+        # config={
+        #     "architecture": "Transformer",
+        #     "epochs": 500,
+        # }
+    )
 
     # Optimizer
     param_groups, lr_names = get_param_groups(config=config, model=model)
@@ -306,6 +320,7 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
 
         # Metrics log
         metric_log.update(name="total_loss", value=loss.item())
+        wandb.log({f"loss_epoch_{epoch+1}": loss.item()})
         loss = loss / accumulation_steps
         loss.backward()
 
