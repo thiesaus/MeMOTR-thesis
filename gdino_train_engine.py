@@ -339,7 +339,7 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
         iter_end_timestamp = time.time()
         metric_log.update(name="time per iter", value=iter_end_timestamp-iter_start_timestamp)
         # Outputs logs
-        if True or i<=5 or (i+1) % 20 == 0:
+        if i<=5 or (i+1) % 100 == 0:
             metric_log.sync()
             max_memory = max([torch.cuda.max_memory_allocated(torch.device('cuda', i))
                               for i in range(distributed_world_size())]) // (1024**2)
@@ -359,7 +359,7 @@ def train_one_epoch(model: Tracknet, train_states: dict, max_norm: float,
                 logger.show('Saving checkpoint for iteration {}'.format(i))
                 save_checkpoint(
                     model=model,
-                    path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+                    path=os.path.join(logger.logdir[:-5], f"checkpoint_ep{epoch}_iter{int(i // 100)}.pth")
                 )
 
         train_states["global_iters"] += 1

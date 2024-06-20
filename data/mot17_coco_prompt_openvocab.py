@@ -105,9 +105,9 @@ class MOT17CocoOV(MOTDataset):
 
         for vid in self.mot17_seq_names:    # vid = 'MOT17-xx'
             
-            # debugging
-            if not vid.startswith('MOT17-04'):
-                continue
+            # # debugging
+            # if not vid.startswith('MOT17-04'):
+            #     continue
 
             for t in text_key[vid]:
                 num=int(t)+1
