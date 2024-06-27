@@ -36,7 +36,7 @@ class RuntimeTracker:
             visualize_ids = tracks[0].ids.cpu().tolist()
 
         # Update tracks.
-        tracks[0].boxes = model_outputs["pred_bboxes"][0][n_dets:]
+        tracks[0].boxes = model_outputs["pred_boxes"][0][n_dets:]
         tracks[0].logits = model_outputs["pred_logits"][0][n_dets:]
         tracks[0].output_embed = model_outputs["outputs"][0][n_dets:]
         tracks[0].scores = logits_to_scores(tracks[0].logits)
@@ -57,21 +57,24 @@ class RuntimeTracker:
         new_tracks = TrackInstances(hidden_dim=tracks[0].hidden_dim, num_classes=tracks[0].num_classes)
         new_tracks_idxes = torch.max(model_outputs["scores"][0][:n_dets], dim=-1).values >= self.det_score_thresh
         new_tracks.logits = model_outputs["pred_logits"][0][:n_dets][new_tracks_idxes]
-        new_tracks.boxes = model_outputs["pred_bboxes"][0][:n_dets][new_tracks_idxes]
+        new_tracks.boxes = model_outputs["pred_boxes"][0][:n_dets][new_tracks_idxes]
         new_tracks.ref_pts = model_outputs["last_ref_pts"][0][:n_dets][new_tracks_idxes]
         new_tracks.scores = model_outputs["scores"][0][:n_dets][new_tracks_idxes]
         new_tracks.output_embed = model_outputs["outputs"][0][:n_dets][new_tracks_idxes]
-        # new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
-        if self.use_dab:
-            new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
-        else:
-            new_tracks.query_embed = torch.cat(
-                (
-                    model_outputs["det_query_embed"][new_tracks_idxes][:, :256],    # hack
-                    model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
-                ),
-                dim=-1
-            )
+        # # new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
+        # if self.use_dab:
+        #     new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
+        # else:
+        #     new_tracks.query_embed = torch.cat(
+        #         (
+        #             model_outputs["det_query_embed"][new_tracks_idxes][:, :256],    # hack
+        #             model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
+        #         ),
+        #         dim=-1
+        #     )
+
+        # (new)
+        new_tracks.query_embed = model_outputs["aux_outputs"][-1]["queries"][0][:n_dets][new_tracks_idxes]
         new_tracks.disappear_time = torch.zeros((len(new_tracks.logits), ), dtype=torch.long)
         new_tracks.labels = torch.max(new_tracks.scores, dim=-1).indices
 
@@ -79,7 +82,7 @@ class RuntimeTracker:
         # this will bring a slight improvement,
         # but makes un-elegant.
         if self.use_motion:
-            new_tracks.last_appear_boxes = model_outputs["pred_bboxes"][0][:n_dets][new_tracks_idxes]
+            new_tracks.last_appear_boxes = model_outputs["pred_boxes"][0][:n_dets][new_tracks_idxes]
         ids = []
         for i in range(len(new_tracks)):
             ids.append(self.max_obj_id)
