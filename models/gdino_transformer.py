@@ -419,6 +419,10 @@ class Transformer(nn.Module):
         # - refpoint_embed(unsigmoid): bs, NQ, d_model
         #########################################################
 
+        # if memory.isnan().any():
+        #     print('hold on bro...')
+        #     import pdb; pdb.set_trace()
+
         #########################################################
         # Begin Decoder
         #########################################################
@@ -624,6 +628,9 @@ class TransformerEncoder(nn.Module):
                         attention_mask_v=key_padding_mask,
                         attention_mask_l=text_attention_mask,
                     )
+                    if output.isnan().any():
+                        print('hold on bro...')
+                        import pdb; pdb.set_trace()
 
             if self.text_layers:
                 memory_text = self.text_layers[layer_id](
@@ -778,6 +785,7 @@ class TransformerDecoder(nn.Module):
                     print(f"num_nan {num_nan}, num_inf {num_inf}")
                 except Exception as e:
                     print(e)
+                import pdb; pdb.set_trace()
                     # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
                     #     import ipdb; ipdb.set_trace()
 
