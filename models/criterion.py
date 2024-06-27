@@ -227,23 +227,6 @@ class ClipCriterion:
                 label_map.append(per_label)
             label_map = torch.stack(label_map,dim=0).squeeze(1)
             label_map_list.append(label_map)
-        # for j in range(len(cat_list)): # bs
-        #     for_match = {
-        #         "pred_logits" : model_outputs['pred_logits'][j].unsqueeze(0),
-        #         "pred_boxes" : model_outputs['pred_boxes'][j].unsqueeze(0)
-        #     }
-        #     inds = self.matcher(for_match, [targets[j]], label_map_list[j])
-        #     indices.extend(inds)
-        #     # indices : A list of size batch_size, containing tuples of (index_i, index_j) where:
-        #     # - index_i is the indices of the selected predictions (in order)
-        #     # - index_j is the indices of the corresponding selected targets (in order)
-
-        # # import pdb; pdb.set_trace()
-        # tgt_ids = [v["labels"].cpu() for v in targets]
-        # # len(tgt_ids) == bs
-        # for i in range(len(indices)):
-        #     tgt_ids[i]=tgt_ids[i][indices[i][1]]
-        #     one_hot[i,indices[i][0]] = label_map_list[i][tgt_ids[i]].to(torch.long)
 
         # 5. Use Hungarian algorithm to matching.
         matcher_res = self.matcher(outputs=detection_res, targets=untracked_gt_trackinstances, use_focal=True, label_map_list=label_map_list)
