@@ -100,7 +100,6 @@ class GroundingDINO(nn.Module):
         self.nheads = nheads
         self.max_text_len = 256
         self.sub_sentence_present = sub_sentence_present
-        # self.num_categories = num_categories
 
         # setting query dim
         self.query_dim = query_dim

@@ -413,7 +413,7 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
         {
             "params": [p for n, p in model.named_parameters() if match_keywords(n, query_updater_keywords)
                        and p.requires_grad],
-            "lr": config["LR"]
+            "lr": config["LR_QUERY_UPDATER"]
         },
         {
             "params": [p for n, p in model.named_parameters() if not match_keywords(n, backbone_keywords)
