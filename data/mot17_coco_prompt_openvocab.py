@@ -131,7 +131,16 @@ class MOT17CocoOV(MOTDataset):
                     pos_map = [0.5] * len(self.categories)
                     for caption in instance["captions"]:
                         for i, cat in enumerate(self.categories):
-                            pos_map[i] = 1 if caption is not None and cat in caption else 0.5
+                            # pos_map[i] = 1 if caption is not None and cat in caption else 0.5
+                            if caption is not None:
+                                if cat == "man" and "woman" in caption:
+                                    pos_map[i] = 0.5
+                                    continue
+                                if cat in caption:
+                                    pos_map[i] = 1
+                                else:
+                                    pos_map[i] = 0.5
+
                     pos_map[0] = 1 # 'person'
                     pos_map[3] = 1 # 'people'
                     self.mot17_gts[vid][num]["pos_map"].append(pos_map)
@@ -171,8 +180,18 @@ class MOT17CocoOV(MOTDataset):
 
         # (new) add category
         # extends the category positive list with the ood categories here. 
-        ood_cat_list = self.get_ood_cat(80 - len(self.categories))
-        cat_list = self.categories + ood_cat_list
+        # ood_cat_list = self.get_ood_cat(80 - len(self.categories))
+        pos_ids = set()
+        for id in range(len(self.categories)):
+            _pos_ids = set()
+            for info_id in range(len(infos)):
+                if (infos[info_id]["positive_maps"][:, id] == 1).all():
+                    _pos_ids.add(id)
+            pos_ids |= _pos_ids
+        
+        pos_cat = self.categories[random.choice(list(pos_ids))]
+        ood_cat_list = self.get_ood_cat(79)
+        cat_list = [pos_cat] + ood_cat_list
         cat_caption = " ".join(cat_list)
 
         return {
